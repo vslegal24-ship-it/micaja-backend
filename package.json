@@ -1,0 +1,19 @@
+{
+  "name": "micaja-backend",
+  "version": "1.0.0",
+  "description": "Backend API para MiCaja - finanzas por WhatsApp",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "@supabase/supabase-js": "^2.39.0",
+    "axios": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
