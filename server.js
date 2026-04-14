@@ -410,14 +410,63 @@ async function processWhatsAppMessage(phone, text) {
 
   const lower = text.toLowerCase().trim();
 
-  // Si no tiene cuenta
+  // ═══ REGISTRO POR WHATSAPP ═══
+  if (!user && (lower === 'registrar' || lower === 'registro' || lower === 'empezar')) {
+    const pin = String(Math.floor(1000 + Math.random() * 9000));
+    const { data: newUser, error } = await supabase
+      .from('users')
+      .insert({ phone, name: '', pin, plan: 'personal' })
+      .select()
+      .single();
+
+    if (!error && newUser) {
+      await sendWhatsApp(phone,
+        `✅ *¡Cuenta creada!*\n\n` +
+        `🔐 Tu PIN de acceso: *${pin}*\n` +
+        `📱 Guárdalo, lo necesitas para la web.\n\n` +
+        `Ahora escríbeme algo como:\n` +
+        `💸 *"pagué luz 80mil"*\n` +
+        `💵 *"vendí 350mil"*\n\n` +
+        `O escribe *"mi nombre es Juan"* para personalizar tu cuenta.`
+      );
+    } else {
+      await sendWhatsApp(phone, `⚠️ Error al crear cuenta. Intenta de nuevo.`);
+    }
+    return;
+  }
+
+  // Si no tiene cuenta y no está registrando
   if (!user) {
     await sendWhatsApp(phone, 
       `👋 ¡Hola! Soy *MiCaja*, tu asistente financiero.\n\n` +
       `Aún no tienes cuenta. Regístrate gratis en:\n` +
-      `🌐 inmovak.com\n\n` +
+      `🌐 milkomercios.in/MiCaja/MiCaja.html\n\n` +
       `O escribe *registrar* para crear tu cuenta aquí.`
     );
+    return;
+  }
+
+  // ═══ CAMBIAR NOMBRE ═══
+  if (lower.startsWith('mi nombre es ') || lower.startsWith('me llamo ')) {
+    const name = text.replace(/^(mi nombre es |me llamo )/i, '').trim();
+    if (name) {
+      await supabase.from('users').update({ name }).eq('id', user.id);
+      await sendWhatsApp(phone, `✅ ¡Listo! Ahora te llamas *${name}*. Mucho gusto 😊`);
+    }
+    return;
+  }
+
+  // ═══ CAMBIAR PLAN ═══
+  if (lower.startsWith('plan ')) {
+    const planMap = { 'personal': 'personal', 'pareja': 'parejas', 'parejas': 'parejas', 'viaje': 'viajes', 'viajes': 'viajes', 'negocio': 'comerciantes', 'comercio': 'comerciantes', 'comerciante': 'comerciantes' };
+    const planKey = lower.replace('plan ', '').trim();
+    const plan = planMap[planKey];
+    if (plan) {
+      await supabase.from('users').update({ plan }).eq('id', user.id);
+      await sendWhatsApp(phone, `✅ Plan cambiado a *${plan}*`);
+    } else {
+      await sendWhatsApp(phone, `Los planes son: *personal*, *parejas*, *viajes*, *negocio*\n\nEscribe: plan personal`);
+    }
     return;
   }
 
