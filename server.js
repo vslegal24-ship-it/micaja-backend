@@ -422,15 +422,24 @@ async function processWhatsAppMessage(phone, text) {
 
   // ═══ PAGAR / SUSCRIPCIÓN ═══
   if (['pagar','suscripción','suscripcion','pago','mi suscripción','activar','renovar','pagar micaja'].includes(lower)) {
-    await sendWhatsApp(phone,
-      `💳 *Suscripción MiCaja*\n\n` +
-      `📋 Acceso completo a todos los módulos\n` +
-      `💰 *$20.000 COP / mes*\n` +
-      `💳 Paga con tarjeta, PSE o Nequi\n\n` +
-      `👇 Ingresa aquí para activar:\n` +
-      `🌐 milkomercios.in/MiCaja/dashboard.html\n\n` +
-      `_(Haz clic en el botón "Activar — $20.000 COP/mes")_`
-    );
+    try {
+      // Generar link directo de pago con token
+      const linkRes = await axios.get(`https://micaja-backend-production.up.railway.app/api/payments/link/${phone}`);
+      if (linkRes.data.ok) {
+        await sendWhatsApp(phone,
+          `💳 *Suscripción MiCaja*\n\n` +
+          `📋 Acceso completo a todos los módulos\n` +
+          `💰 *$20.000 COP / mes*\n` +
+          `💳 Tarjeta, PSE, Nequi\n\n` +
+          `👇 Haz clic para pagar directo (sin login):\n${linkRes.data.url}\n\n` +
+          `⏱ _El link expira en 30 minutos_`
+        );
+      }
+    } catch(e) {
+      await sendWhatsApp(phone,
+        `💳 Para pagar tu suscripción entra a:\n🌐 milkomercios.in/MiCaja/dashboard.html`
+      );
+    }
     return;
   }
   if (['borrar último','borrar ultimo','borrar','eliminar último','eliminar ultimo','deshacer'].includes(lower)) {
@@ -722,7 +731,62 @@ app.get('/api/admin/users/:id/data', verifyAdmin, async (req, res) => {
 // ══════════════════════════════════════
 const crypto = require('crypto');
 
-// Generar parámetros de pago Bold (el checkout se abre desde el frontend)
+// Generar link de pago directo por teléfono (para WhatsApp)
+app.get('/api/payments/link/:phone', async (req, res) => {
+  try {
+    const phone = req.params.phone;
+    const { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    const orderId = `MICAJA-${user.id.slice(0,8)}-${Date.now()}`;
+    const amount = '20000';
+    const currency = 'COP';
+    const integString = `${orderId}${amount}${currency}${BOLD_SECRET_KEY}`;
+    const integritySignature = crypto.createHash('sha256').update(integString).digest('hex');
+
+    // Token temporal (expira en 30 min)
+    const token = crypto.createHash('sha256').update(`${phone}-${Date.now()}-${BOLD_SECRET_KEY}`).digest('hex').slice(0, 16);
+
+    // Guardar token en sesión
+    await supabase.from('wa_sessions').upsert({
+      phone, user_id: user.id,
+      context: JSON.stringify({ payToken: token, orderId, amount, currency, integritySignature, apiKey: BOLD_API_KEY, tokenExpiry: Date.now() + 30*60*1000 }),
+      updated_at: new Date()
+    }, { onConflict: 'phone' });
+
+    // Registrar pago pendiente
+    await supabase.from('payments').insert({
+      user_id: user.id, amount: 20000, method: 'bold',
+      reference: orderId, status: 'pending',
+      period_start: new Date().toISOString().split('T')[0],
+      period_end: new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0]
+    });
+
+    const payUrl = `https://milkomercios.in/MiCaja/pagar.html?tel=${phone}&token=${token}`;
+    res.json({ ok: true, url: payUrl });
+  } catch (err) {
+    res.status(500).json({ error: 'Error generando link' });
+  }
+});
+
+// Obtener datos de pago por token (pagar.html lo llama)
+app.get('/api/payments/token/:phone/:token', async (req, res) => {
+  try {
+    const { phone, token } = req.params;
+    const { data: session } = await supabase.from('wa_sessions').select('context').eq('phone', phone).single();
+    if (!session) return res.status(404).json({ error: 'Token no encontrado' });
+
+    const ctx = JSON.parse(session.context || '{}');
+    if (ctx.payToken !== token) return res.status(401).json({ error: 'Token inválido' });
+    if (ctx.tokenExpiry < Date.now()) return res.status(401).json({ error: 'Token expirado' });
+
+    res.json({ ok: true, orderId: ctx.orderId, amount: ctx.amount, currency: ctx.currency, integritySignature: ctx.integritySignature, apiKey: ctx.apiKey, redirectionUrl: 'https://milkomercios.in/MiCaja/dashboard.html', description: 'MiCaja - Suscripción mensual $20.000' });
+  } catch (err) {
+    res.status(500).json({ error: 'Error' });
+  }
+});
+
+// Generar parámetros de pago Bold (el checkout se abre desde el frontend web)
 app.post('/api/payments/create', async (req, res) => {
   try {
     const { user_id } = req.body;
