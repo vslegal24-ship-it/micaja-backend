@@ -384,11 +384,34 @@ app.post('/api/trips/:id/finalizar', async (req, res) => {
 
 app.post('/api/trips/:tripId/expenses', async (req, res) => {
   try {
-    const { description, amount, category, payer, split_between } = req.body;
-    const { data, error } = await supabase.from('trip_expenses').insert({ trip_id: req.params.tripId, description, amount, category: category || 'General', payer, split_between }).select().single();
+    const { description, amount, category, payer, split_between, notes, expense_date } = req.body;
+    const { data, error } = await supabase.from('trip_expenses').insert({
+      trip_id: req.params.tripId, description, amount,
+      category: category || 'General', payer, split_between,
+      notes: notes || null,
+      expense_date: expense_date || new Date().toISOString().split('T')[0]
+    }).select().single();
     if (error) throw error;
     res.json({ ok: true, expense: data });
   } catch (err) { res.status(500).json({ error: 'Error al agregar gasto' }); }
+});
+
+// Editar gasto
+app.put('/api/trips/:tripId/expenses/:expId', async (req, res) => {
+  try {
+    const { description, amount, category, payer, split_between, notes, expense_date } = req.body;
+    const updates = {};
+    if (description !== undefined) updates.description = description;
+    if (amount !== undefined) updates.amount = amount;
+    if (category !== undefined) updates.category = category;
+    if (payer !== undefined) updates.payer = payer;
+    if (split_between !== undefined) updates.split_between = split_between;
+    if (notes !== undefined) updates.notes = notes;
+    if (expense_date !== undefined) updates.expense_date = expense_date;
+    const { data, error } = await supabase.from('trip_expenses').update(updates).eq('id', req.params.expId).select().single();
+    if (error) throw error;
+    res.json({ ok: true, expense: data });
+  } catch (err) { res.status(500).json({ error: 'Error al editar gasto' }); }
 });
 
 app.delete('/api/trips/:tripId/expenses/:expId', async (req, res) => {
@@ -396,6 +419,15 @@ app.delete('/api/trips/:tripId/expenses/:expId', async (req, res) => {
     await supabase.from('trip_expenses').delete().eq('id', req.params.expId);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: 'Error al eliminar gasto' }); }
+});
+
+// Desmarcar pago/abono de deuda
+app.delete('/api/trips/:id/debt-payments', async (req, res) => {
+  try {
+    const { debt_key } = req.body;
+    await supabase.from('trip_debt_payments').delete().eq('trip_id', req.params.id).eq('debt_key', debt_key);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error al desmarcar' }); }
 });
 
 app.get('/api/trips/:tripId/balance', async (req, res) => {
@@ -421,6 +453,57 @@ app.get('/api/trips/:tripId/balance', async (req, res) => {
     }
     res.json({ ok: true, balances, debts, total: (expenses||[]).reduce((s,e) => s + Number(e.amount), 0) });
   } catch (err) { res.status(500).json({ error: 'Error al calcular balance' }); }
+});
+
+// ══════════════════════════════════════
+// AMIGOS VIAJEROS
+// ══════════════════════════════════════
+app.get('/api/travel-friends/:userId', async (req, res) => {
+  try {
+    const { data } = await supabase.from('travel_friends').select('*').eq('user_id', req.params.userId).order('name');
+    res.json({ ok: true, friends: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
+app.post('/api/travel-friends', async (req, res) => {
+  try {
+    const { user_id, name, phone } = req.body;
+    if (!user_id || !name) return res.status(400).json({ error: 'Campos requeridos' });
+    const { data, error } = await supabase.from('travel_friends').upsert({ user_id, name, phone: phone||null }, { onConflict: 'user_id,name' }).select().single();
+    if (error) throw error;
+    res.json({ ok: true, friend: data });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
+app.delete('/api/travel-friends/:id', async (req, res) => {
+  try {
+    await supabase.from('travel_friends').delete().eq('id', req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
+
+// PRESUPUESTO DE VIAJE — envía estimado por WA
+app.post('/api/trips/:id/presupuesto', async (req, res) => {
+  try {
+    const { budget_per_person, categories, members, trip_name } = req.body;
+    const total = budget_per_person * (members||[]).length;
+    const sent = [];
+    for (const mp of (members||[])) {
+      if (!mp.phone) continue;
+      const phone = mp.phone.replace(/[\s\-\+\(\)]/g,'').replace(/^0/,'');
+      const finalPhone = phone.startsWith('57') ? phone : '57'+phone;
+      const catLines = (categories||[]).map(c => `  • ${c.name}: $${Number(c.amount).toLocaleString()} COP`).join('\n');
+      const msg =
+        `📋 *Presupuesto estimado — ${trip_name}*\n\n` +
+        `Hola *${mp.name}*! 👋\n\n` +
+        `Se está planeando un viaje y queremos que tengas una idea de los costos:\n\n` +
+        `💰 *Por persona: $${Number(budget_per_person).toLocaleString()} COP*\n\n` +
+        (catLines ? `📊 *Desglose estimado:*\n${catLines}\n\n` : '') +
+        `💸 Total grupo (${members.length} personas): *$${total.toLocaleString()} COP*\n\n` +
+        `_Presupuesto estimado — los gastos reales se registrarán en MiCaja._ ✈️`;
+      await sendWhatsApp(finalPhone, msg);
+      sent.push(mp.name);
+    }
+    res.json({ ok: true, sent });
+  } catch (err) { res.status(500).json({ error: 'Error al enviar presupuesto' }); }
 });
 
 // ══════ WHATSAPP WEBHOOK ══════
