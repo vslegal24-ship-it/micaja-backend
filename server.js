@@ -792,23 +792,34 @@ async function verifyAdmin(req, res, next) {
   next();
 }
 
-// Listar todos los usuarios con conteo de movimientos
+// Listar todos los usuarios con conteo de movimientos e ingresos
 app.get('/api/admin/users', verifyAdmin, async (req, res) => {
   try {
     const { data: users } = await supabase.from('users').select('*').order('created_at', { ascending: false });
     if (!users) return res.json({ ok: true, users: [] });
 
-    // Para cada usuario, contar movimientos y calcular volumen
     const enriched = await Promise.all(users.map(async u => {
       const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', u.id);
       const count = (movs || []).length;
-      const volume = (movs || []).reduce((s, m) => s + Number(m.amount), 0);
-      const { pin: _, ...safeUser } = u;
-      return { ...safeUser, movement_count: count, total_volume: volume };
+      const income = (movs || []).filter(m => m.type === 'income').reduce((s, m) => s + Number(m.amount), 0);
+      const { pin: _, verify_code: __, ...safeUser } = u;
+      return { ...safeUser, movement_count: count, income_total: income };
     }));
 
     res.json({ ok: true, users: enriched });
   } catch (err) { res.status(500).json({ error: 'Error al obtener usuarios' }); }
+});
+
+// Listar pagos para admin
+app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
+  try {
+    const { data: payments } = await supabase
+      .from('payments')
+      .select('*, users(name, phone)')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    res.json({ ok: true, payments: payments || [] });
+  } catch (err) { res.status(500).json({ error: 'Error al obtener pagos' }); }
 });
 
 // Editar usuario (PIN, rol, estado, plan, nombre)
@@ -850,6 +861,20 @@ app.get('/api/admin/users/:id/data', verifyAdmin, async (req, res) => {
       trips: trips || []
     });
   } catch (err) { res.status(500).json({ error: 'Error al obtener datos' }); }
+});
+
+// Actualizar datos del usuario (nombre negocio, nombre, etc.)
+app.put('/api/users/:id', async (req, res) => {
+  try {
+    const allowed = ['name', 'business_name', 'partner_name', 'plan'];
+    const updates = {};
+    allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
+    if (!Object.keys(updates).length) return res.status(400).json({ error: 'Sin campos para actualizar' });
+    const { data, error } = await supabase.from('users').update(updates).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    const { pin: _, verify_code: __, ...safeUser } = data;
+    res.json({ ok: true, user: safeUser });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar' }); }
 });
 
 // ══════════════════════════════════════
