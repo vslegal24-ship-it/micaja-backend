@@ -202,6 +202,38 @@ app.get('/api/trips/:userId', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al obtener viajes' }); }
 });
 
+// Agregar miembro a viaje existente
+app.post('/api/trips/:id/members', async (req, res) => {
+  try {
+    const { name, phone } = req.body;
+    if (!name) return res.status(400).json({ error: 'Nombre requerido' });
+    const { data, error } = await supabase.from('trip_members').insert({ trip_id: req.params.id, name, phone: phone || null }).select().single();
+    if (error) throw error;
+    res.json({ ok: true, member: data });
+  } catch (err) { res.status(500).json({ error: 'Error al agregar miembro' }); }
+});
+
+// Actualizar teléfono de miembro
+app.put('/api/trips/:tripId/members/:memberId', async (req, res) => {
+  try {
+    const { phone, name } = req.body;
+    const updates = {};
+    if (phone !== undefined) updates.phone = phone;
+    if (name !== undefined) updates.name = name;
+    const { data, error } = await supabase.from('trip_members').update(updates).eq('id', req.params.memberId).select().single();
+    if (error) throw error;
+    res.json({ ok: true, member: data });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar miembro' }); }
+});
+
+// Eliminar miembro del viaje
+app.delete('/api/trips/:tripId/members/:memberId', async (req, res) => {
+  try {
+    await supabase.from('trip_members').delete().eq('id', req.params.memberId);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error al eliminar miembro' }); }
+});
+
 // Editar nombre o estado del viaje
 app.put('/api/trips/:id', async (req, res) => {
   try {
@@ -225,7 +257,51 @@ app.delete('/api/trips/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al eliminar' }); }
 });
 
-// Finalizar viaje — calcula balances y envía WhatsApp a cada miembro
+// Registrar pago/abono de deuda en viaje
+app.post('/api/trips/:id/debt-payments', async (req, res) => {
+  try {
+    const { debt_key, amount, from_name, to_name } = req.body;
+    const { data, error } = await supabase.from('trip_debt_payments').insert({
+      trip_id: req.params.id, debt_key, amount, from_name, to_name
+    }).select().single();
+    if (error) throw error;
+    res.json({ ok: true, payment: data });
+  } catch (err) { res.status(500).json({ error: 'Error al registrar pago' }); }
+});
+
+// Obtener pagos de deudas de un viaje
+app.get('/api/trips/:id/debt-payments', async (req, res) => {
+  try {
+    const { data } = await supabase.from('trip_debt_payments').select('*').eq('trip_id', req.params.id);
+    res.json({ ok: true, payments: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
+
+// Enviar recordatorio de deuda por WhatsApp
+app.post('/api/trips/recordatorio', async (req, res) => {
+  try {
+    const { phone, from_name, to_name, amount, total, trip_name, sender_phone } = req.body;
+    const cleanPhone = phone.replace(/[\s\-\+\(\)]/g,'').replace(/^0/,'');
+    const finalPhone = cleanPhone.startsWith('57') ? cleanPhone : '57' + cleanPhone;
+
+    const msg =
+      `💬 *Recordatorio de pago — Viaje: ${trip_name}*\n\n` +
+      `Hola *${from_name}* 👋\n\n` +
+      `Te recuerdo que tienes un pago pendiente del viaje *${trip_name}*:\n\n` +
+      `💸 Le debes a *${to_name}*: *$${Number(amount).toLocaleString()} COP*\n` +
+      (total !== amount ? `📊 Deuda original: $${Number(total).toLocaleString()} COP\n` : '') +
+      `\n_Este mensaje fue enviado automáticamente desde MiCaja para evitar la pena de cobrar 😊_`;
+
+    await sendWhatsApp(finalPhone, msg);
+
+    // Notificar al que envió el recordatorio
+    if (sender_phone) {
+      await sendWhatsApp(sender_phone, `✅ Recordatorio enviado a *${from_name}* por $${Number(amount).toLocaleString()}`);
+    }
+
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error al enviar recordatorio' }); }
+});
 app.post('/api/trips/:id/finalizar', async (req, res) => {
   try {
     const { user_phone } = req.body;
@@ -302,6 +378,13 @@ app.post('/api/trips/:tripId/expenses', async (req, res) => {
     if (error) throw error;
     res.json({ ok: true, expense: data });
   } catch (err) { res.status(500).json({ error: 'Error al agregar gasto' }); }
+});
+
+app.delete('/api/trips/:tripId/expenses/:expId', async (req, res) => {
+  try {
+    await supabase.from('trip_expenses').delete().eq('id', req.params.expId);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error al eliminar gasto' }); }
 });
 
 app.get('/api/trips/:tripId/balance', async (req, res) => {
