@@ -315,9 +315,15 @@ app.post('/api/trips/recordatorio', async (req, res) => {
 });
 app.post('/api/trips/:id/finalizar', async (req, res) => {
   try {
-    const { user_phone } = req.body;
+    const { user_phone, skip_notify } = req.body;
     const { data: trip } = await supabase.from('trips').select('*, trip_members(*), trip_expenses(*)').eq('id', req.params.id).single();
     if (!trip) return res.status(404).json({ error: 'Viaje no encontrado' });
+
+    // Si skip_notify, solo marcar como finalizado
+    if (skip_notify) {
+      await supabase.from('trips').update({ status: 'finished' }).eq('id', req.params.id);
+      return res.json({ ok: true, sent: 0, total: 0 });
+    }
 
     const members = trip.trip_members || [];
     const expenses = trip.trip_expenses || [];
