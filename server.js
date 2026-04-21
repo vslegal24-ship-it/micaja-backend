@@ -178,6 +178,17 @@ app.post('/webhook', async (req, res) => {
     if (!messages || messages.length === 0) return res.sendStatus(200);
     const msg = messages[0];
     const from = msg.from;
+
+    // Manejar audios, imágenes, stickers, etc.
+    if (msg.type === 'audio' || msg.type === 'voice') {
+      await sendWhatsApp(from, `🎤 No proceso mensajes de voz todavía.\n\nEscríbeme el gasto o ingreso así:\n💸 _"pagué luz 80mil"_\n💵 _"me ingresaron 200mil"_`);
+      return res.sendStatus(200);
+    }
+    if (msg.type === 'image' || msg.type === 'video' || msg.type === 'document' || msg.type === 'sticker') {
+      await sendWhatsApp(from, `📎 Solo proceso mensajes de texto por ahora.\n\nEscríbeme lo que quieres registrar 😊`);
+      return res.sendStatus(200);
+    }
+
     const text = msg.text?.body?.trim();
     if (!text) return res.sendStatus(200);
     console.log(`📱 WhatsApp de ${from}: ${text}`);
@@ -409,27 +420,81 @@ async function processWhatsAppMessage(phone, text) {
 
   // ═══ BORRAR ═══
   if (['borrar último','borrar ultimo','borrar','eliminar último','eliminar ultimo','deshacer'].includes(lower)) {
-    const { data: last } = await supabase.from('movements').select('id, description, amount').eq('user_id', user.id).order('created_at',{ascending:false}).limit(1).single();
-    if (last) { await supabase.from('movements').delete().eq('id', last.id); await sendWhatsApp(phone, `🗑 Borré: "${last.description}" ($${Number(last.amount).toLocaleString()})`); }
-    else { await sendWhatsApp(phone, `No tienes movimientos para borrar 📭`); }
+    const module = user.plan || 'personal';
+    const { data: last } = await supabase.from('movements').select('id, description, amount, type, category').eq('user_id', user.id).eq('module', module).order('created_at',{ascending:false}).limit(1).single();
+    if (last) {
+      await supabase.from('movements').delete().eq('id', last.id);
+      await sendWhatsApp(phone, `🗑 Borré el último movimiento:\n${last.type==='income'?'💵':'💸'} *${last.description}* — $${Number(last.amount).toLocaleString()}\n📂 ${last.category}`);
+    } else {
+      await sendWhatsApp(phone, `No tienes movimientos para borrar 📭`);
+    }
     return;
   }
 
-  // ═══ GASTO O INGRESO — con IA ═══
+  // ═══ VER ÚLTIMOS MOVIMIENTOS ═══
+  if (['últimos','ultimos','últimos movimientos','ver últimos','mis movimientos','ver movimientos'].includes(lower)) {
+    const module = user.plan || 'personal';
+    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', module).order('created_at',{ascending:false}).limit(5);
+    if (!movs || !movs.length) { await sendWhatsApp(phone, `No tienes movimientos aún 📭`); return; }
+    const lista = movs.map((m,i) => `${i+1}. ${m.type==='income'?'💵':'💸'} ${m.description} — $${Number(m.amount).toLocaleString()}\n   📂 ${m.category} · ${m.date}`).join('\n\n');
+    await sendWhatsApp(phone, `🕐 *Últimos 5 movimientos:*\n\n${lista}\n\nPara borrar el último escribe _"borrar"_`);
+    return;
+  }
+
+  // ═══ CONFIRMAR CATEGORÍA (flujo de 2 pasos) ═══
+  if (ctx.step === 'confirm_cat') {
+    const cats = {'1':'Alimentación','2':'Arriendo','3':'Servicios','4':'Transporte','5':'Salud','6':'Entretenimiento','7':'Educación','8':'Proveedores','9':'Nómina','10':'Ventas','11':'Salario','0':'Otros'};
+    const finalCat = cats[lower] || (Object.values(cats).map(c=>c.toLowerCase()).includes(lower) ? lower.charAt(0).toUpperCase()+lower.slice(1) : null);
+
+    if (lower === 'cancelar' || lower === 'no') {
+      await clearCtx();
+      await sendWhatsApp(phone, `❌ Cancelado. No se guardó nada.`);
+      return;
+    }
+
+    const useCat = finalCat || (lower === 'si' || lower === 'sí' || lower === 'ok' || lower === 'listo' ? ctx.category : null);
+    if (useCat) {
+      const module = user.plan || 'personal';
+      const planNames = {personal:'👤',parejas:'💑',viajes:'✈️',comerciantes:'🏪'};
+      const { error } = await supabase.from('movements').insert({user_id: user.id, type: ctx.type, amount: ctx.amount, description: ctx.description, category: useCat, source: 'whatsapp', module}).select().single();
+      if (!error) {
+        await clearCtx();
+        const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', module);
+        const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
+        if (ctx.type === 'income') {
+          await sendWhatsApp(phone, `✅ *Ingreso guardado*\n\n💵 ${ctx.description}\n💰 +$${Number(ctx.amount).toLocaleString()}\n📂 ${useCat}\n${planNames[module]} ${module}\n\nBalance: *$${bal.toLocaleString()}* 📊`);
+        } else {
+          await sendWhatsApp(phone, `✅ *Gasto guardado*\n\n💸 ${ctx.description}\n💰 -$${Number(ctx.amount).toLocaleString()}\n📂 ${useCat}\n${planNames[module]} ${module}\n\nTe queda: *$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}`);
+        }
+      }
+    } else {
+      await sendWhatsApp(phone, `Elige una categoría:\n\n*1* Alimentación · *2* Arriendo · *3* Servicios\n*4* Transporte · *5* Salud · *6* Entretenimiento\n*7* Educación · *8* Proveedores · *9* Nómina\n*10* Ventas · *11* Salario · *0* Otros\n\nO escribe el nombre · _"cancelar"_ para anular`);
+    }
+    return;
+  }
+
+  // ═══ GASTO O INGRESO — parser con confirmación de categoría ═══
   const parsed = await parseWithAI(lower, user.name, user.plan);
   if (parsed) {
     const module = user.plan || 'personal';
-    const { error } = await supabase.from('movements').insert({ user_id: user.id, type: parsed.type, amount: parsed.amount, description: parsed.description, category: parsed.category, source: 'whatsapp', module }).select().single();
-    if (!error) {
-      // Balance filtrado por módulo
-      const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', module);
-      const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
-      if (parsed.type === 'income') {
-        await sendWhatsApp(phone, `💵 *Ingreso registrado*\n\n📝 ${parsed.description}\n💰 +$${parsed.amount.toLocaleString()}\n📂 ${parsed.category}\n\nBalance: *$${bal.toLocaleString()}* 📊`);
-      } else {
-        await sendWhatsApp(phone, `💸 *Gasto registrado*\n\n📝 ${parsed.description}\n💰 -$${parsed.amount.toLocaleString()}\n📂 ${parsed.category}\n\nTe queda: *$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}`);
-      }
-    }
+    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+    const emoji = parsed.type === 'income' ? '💵' : '💸';
+    const label = parsed.type === 'income' ? 'ingreso' : 'gasto';
+    await setCtx({step: 'confirm_cat', type: parsed.type, amount: parsed.amount, description: parsed.description, category: parsed.category});
+    await sendWhatsApp(phone,
+      `${emoji} Entendí un *${label}*:\n\n` +
+      `📝 *${parsed.description}*\n` +
+      `💰 $${parsed.amount.toLocaleString()}\n` +
+      `📂 Categoría sugerida: *${parsed.category}*\n` +
+      `📋 Módulo: *${planNames[module]}*\n\n` +
+      `¿Correcto? Escribe *sí* para guardar\n` +
+      `O elige otra categoría:\n` +
+      `*1* Alimentación · *2* Arriendo · *3* Servicios\n` +
+      `*4* Transporte · *5* Salud · *6* Entretenimiento\n` +
+      `*7* Educación · *8* Proveedores · *9* Nómina\n` +
+      `*10* Ventas · *11* Salario · *0* Otros\n` +
+      `❌ _"cancelar"_ para anular`
+    );
     return;
   }
 
