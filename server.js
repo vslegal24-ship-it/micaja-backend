@@ -889,37 +889,37 @@ app.get('/api/payments/token/:phone/:token', async (req, res) => {
 // Generar parámetros de pago Bold (el checkout se abre desde el frontend web)
 app.post('/api/payments/create', async (req, res) => {
   try {
-    const { user_id } = req.body;
+    const { user_id, plan_type = 'mensual' } = req.body;
     if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
 
     const { data: user } = await supabase.from('users').select('name, phone').eq('id', user_id).single();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
-    const orderId = `MICAJA-${user_id.slice(0,8)}-${Date.now()}`;
-    const amount = '20000'; // $20.000 COP en centavos (sin decimales)
-    const currency = 'COP';
+    // Configurar según plan
+    const plans = {
+      mensual:  { amount: '20000',  label: 'Suscripción mensual $20.000',   days: 30 },
+      anual:    { amount: '200000', label: 'Suscripción anual $200.000',    days: 365 },
+      lifetime: { amount: '320000', label: 'Acceso de por vida $320.000',   days: 36500 }
+    };
+    const plan = plans[plan_type] || plans.mensual;
 
-    // Hash de integridad: orderId + amount + currency + secretKey
-    const integString = `${orderId}${amount}${currency}${BOLD_SECRET_KEY}`;
+    const orderId = `MICAJA-${user_id.slice(0,8)}-${Date.now()}`;
+    const currency = 'COP';
+    const integString = `${orderId}${plan.amount}${currency}${BOLD_SECRET_KEY}`;
     const integritySignature = crypto.createHash('sha256').update(integString).digest('hex');
 
-    // Registrar pago pendiente
     await supabase.from('payments').insert({
-      user_id, amount: 20000, method: 'bold',
-      reference: orderId, status: 'pending',
+      user_id, amount: parseInt(plan.amount), method: 'bold',
+      reference: orderId, status: 'pending', plan_type,
       period_start: new Date().toISOString().split('T')[0],
-      period_end: new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0]
+      period_end: new Date(Date.now() + plan.days*24*60*60*1000).toISOString().split('T')[0]
     });
 
     res.json({
-      ok: true,
-      orderId,
-      amount,
-      currency,
-      integritySignature,
-      apiKey: BOLD_API_KEY,
+      ok: true, orderId, amount: plan.amount, currency,
+      integritySignature, apiKey: BOLD_API_KEY,
       redirectionUrl: 'https://milkomercios.in/MiCaja/dashboard.html',
-      description: 'MiCaja - Suscripción mensual $20.000'
+      description: plan.label
     });
   } catch (err) {
     console.error('Bold create error:', err);
