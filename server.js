@@ -64,9 +64,13 @@ app.post('/api/auth/reset-pin', async (req, res) => {
 });
 
 // ══════ MOVIMIENTOS ══════
+// Obtener movimientos filtrados por módulo
 app.get('/api/movements/:userId', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('movements').select('*').eq('user_id', req.params.userId).order('date', { ascending: false }).limit(100);
+    const { module } = req.query; // ?module=personal o ?module=comerciantes
+    let query = supabase.from('movements').select('*').eq('user_id', req.params.userId).order('date', { ascending: false }).limit(200);
+    if (module) query = query.eq('module', module);
+    const { data, error } = await query;
     if (error) throw error;
     res.json({ ok: true, movements: data });
   } catch (err) { res.status(500).json({ error: 'Error al obtener movimientos' }); }
@@ -74,10 +78,10 @@ app.get('/api/movements/:userId', async (req, res) => {
 
 app.post('/api/movements', async (req, res) => {
   try {
-    const { user_id, type, amount, description, category, who, shared, note, date, source } = req.body;
+    const { user_id, type, amount, description, category, who, shared, note, date, source, module } = req.body;
     if (!user_id || !type || !amount || !description) return res.status(400).json({ error: 'Campos requeridos: user_id, type, amount, description' });
     const finalCategory = category || autoCategory(description, type);
-    const { data, error } = await supabase.from('movements').insert({ user_id, type, amount, description, category: finalCategory, who, shared, note, date: date || new Date().toISOString().split('T')[0], source: source || 'web' }).select().single();
+    const { data, error } = await supabase.from('movements').insert({ user_id, type, amount, description, category: finalCategory, who, shared, note, date: date || new Date().toISOString().split('T')[0], source: source || 'web', module: module || 'personal' }).select().single();
     if (error) throw error;
     res.json({ ok: true, movement: data });
   } catch (err) { res.status(500).json({ error: 'Error al crear movimiento' }); }
@@ -93,7 +97,10 @@ app.delete('/api/movements/:id', async (req, res) => {
 
 app.get('/api/summary/:userId', async (req, res) => {
   try {
-    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', req.params.userId);
+    const { module } = req.query;
+    let query = supabase.from('movements').select('*').eq('user_id', req.params.userId);
+    if (module) query = query.eq('module', module);
+    const { data: movs } = await query;
     const income = (movs||[]).filter(m => m.type === 'income').reduce((s,m) => s + Number(m.amount), 0);
     const expense = (movs||[]).filter(m => m.type === 'expense').reduce((s,m) => s + Number(m.amount), 0);
     const byCategory = {};
@@ -309,7 +316,8 @@ async function processWhatsAppMessage(phone, text) {
 
   // ═══ RESUMEN COMPLETO ═══
   if (['resumen','cuánto llevo','cuanto llevo','balance','cómo voy','como voy','cómo voy?','como voy?','estado','saldo'].includes(lower)) {
-    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id);
+    const module = user.plan || 'personal';
+    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', module);
     const inc = (movs||[]).filter(m => m.type==='income').reduce((s,m) => s+Number(m.amount), 0);
     const exp = (movs||[]).filter(m => m.type==='expense').reduce((s,m) => s+Number(m.amount), 0);
     const bal = inc - exp;
@@ -342,12 +350,14 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ═══ GASTO O INGRESO ═══
-  const parsed = parseFinancialMessage(lower);
+  // ═══ GASTO O INGRESO — con IA ═══
+  const parsed = await parseWithAI(lower, user.name, user.plan);
   if (parsed) {
-    const { error } = await supabase.from('movements').insert({ user_id: user.id, type: parsed.type, amount: parsed.amount, description: parsed.description, category: parsed.category, source: 'whatsapp' }).select().single();
+    const module = user.plan || 'personal';
+    const { error } = await supabase.from('movements').insert({ user_id: user.id, type: parsed.type, amount: parsed.amount, description: parsed.description, category: parsed.category, source: 'whatsapp', module }).select().single();
     if (!error) {
-      const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id);
+      // Balance filtrado por módulo
+      const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', module);
       const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
       if (parsed.type === 'income') {
         await sendWhatsApp(phone, `💵 *Ingreso registrado*\n\n📝 ${parsed.description}\n💰 +$${parsed.amount.toLocaleString()}\n📂 ${parsed.category}\n\nBalance: *$${bal.toLocaleString()}* 📊`);
@@ -362,7 +372,48 @@ async function processWhatsAppMessage(phone, text) {
   await sendWhatsApp(phone, `Mmm, no pillé eso 🤔\n\nPrueba:\n💸 _"pagué luz 80mil"_\n💵 _"vendí 350mil"_\n📊 _"cómo voy?"_\n🔐 _"pin"_\n\nO escribe *ayuda*`);
 }
 
-// ══════ PARSER FINANCIERO ══════
+// ══════ PARSER FINANCIERO CON IA (Claude API) ══════
+async function parseWithAI(text, userName, plan) {
+  try {
+    const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY;
+    if (!ANTHROPIC_KEY) return parseFinancialMessage(text); // fallback si no hay key
+
+    const res = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      messages: [{
+        role: 'user',
+        content: `Eres el asistente financiero de MiCaja para Colombia. El usuario se llama ${userName||'usuario'} y usa el módulo ${plan||'personal'}.
+
+Analiza este mensaje y extrae la información financiera. Responde SOLO con JSON sin markdown:
+{"type":"income"|"expense"|"unknown","amount":number_in_COP,"description":"descripcion_limpia","category":"categoria"}
+
+Categorías válidas para gastos: Alimentación, Arriendo, Servicios, Transporte, Salud, Entretenimiento, Educación, Nómina, Proveedores, Mercancía, Otros
+Categorías para ingresos: Ventas, Salario, Freelance, Cobros, Otros ingresos
+
+Reglas:
+- "mil" = 1000, "millón/millones" = 1000000, "k" = 1000
+- Si no hay monto claro, type = "unknown"
+- Descripción debe ser corta y limpia (2-4 palabras max)
+- Detecta contexto colombiano: "fiao/fiado" = gasto, "abono" = ingreso, "cuota" = gasto
+
+Mensaje: "${text}"`
+      }]
+    }, {
+      headers: { 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }
+    });
+
+    const raw = res.data.content[0].text.trim();
+    const parsed = JSON.parse(raw);
+    if (parsed.type === 'unknown' || !parsed.amount) return null;
+    return parsed;
+  } catch (e) {
+    console.error('AI parse error:', e.message);
+    return parseFinancialMessage(text); // fallback al parser simple
+  }
+}
+
+// ══════ PARSER FINANCIERO SIMPLE (fallback) ══════
 function parseFinancialMessage(text) {
   let n = text.replace(/(\d+)\s*mil/gi, (_,x) => String(Number(x)*1000)).replace(/(\d+\.?\d*)\s*m(?:illones?)?/gi, (_,x) => String(Number(x)*1000000)).replace(/(\d+)k/gi, (_,x) => String(Number(x)*1000));
   const amtMatch = n.match(/\$?\s*([\d,.]+)/);
