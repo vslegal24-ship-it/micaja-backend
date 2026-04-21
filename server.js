@@ -283,20 +283,31 @@ app.post('/api/trips/recordatorio', async (req, res) => {
     const { phone, from_name, to_name, amount, total, trip_name, sender_phone } = req.body;
     const cleanPhone = phone.replace(/[\s\-\+\(\)]/g,'').replace(/^0/,'');
     const finalPhone = cleanPhone.startsWith('57') ? cleanPhone : '57' + cleanPhone;
+    const pendiente = Number(amount);
+    const totalOriginal = Number(total);
+    const abonado = totalOriginal - pendiente;
 
     const msg =
-      `💬 *Recordatorio de pago — Viaje: ${trip_name}*\n\n` +
-      `Hola *${from_name}* 👋\n\n` +
-      `Te recuerdo que tienes un pago pendiente del viaje *${trip_name}*:\n\n` +
-      `💸 Le debes a *${to_name}*: *$${Number(amount).toLocaleString()} COP*\n` +
-      (total !== amount ? `📊 Deuda original: $${Number(total).toLocaleString()} COP\n` : '') +
-      `\n_Este mensaje fue enviado automáticamente desde MiCaja para evitar la pena de cobrar 😊_`;
+      `🤖 Hola *${from_name}*, soy *MiCajaBot* 👋\n\n` +
+      `Te escribo de parte de *${to_name}* para recordarte amablemente que tienes un saldo pendiente del viaje:\n\n` +
+      `✈️ *${trip_name}*\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `💸 Deuda original: *$${totalOriginal.toLocaleString()} COP*\n` +
+      (abonado > 0 ? `✅ Ya abonaste: *$${abonado.toLocaleString()} COP*\n` : ``) +
+      `⚠️ Saldo pendiente: *$${pendiente.toLocaleString()} COP*\n` +
+      `━━━━━━━━━━━━━━━━\n\n` +
+      `*${to_name}* puso ese dinero de su bolsillo por ti durante el viaje. Cuando puedas coordina el pago con él/ella.\n\n` +
+      `_Para que *${to_name}* deje de enviarte estos recordatorios automáticos, pídele que marque la deuda como pagada en MiCaja una vez hagas la transferencia._ 😊\n\n` +
+      `_MiCaja · milkomercios.in/MiCaja_`;
 
     await sendWhatsApp(finalPhone, msg);
 
-    // Notificar al que envió el recordatorio
     if (sender_phone) {
-      await sendWhatsApp(sender_phone, `✅ Recordatorio enviado a *${from_name}* por $${Number(amount).toLocaleString()}`);
+      await sendWhatsApp(sender_phone,
+        `✅ Recordatorio enviado a *${from_name}*\n` +
+        `💸 Saldo pendiente: *$${pendiente.toLocaleString()} COP*\n` +
+        `✈️ Viaje: *${trip_name}*`
+      );
     }
 
     res.json({ ok: true });
