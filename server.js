@@ -420,6 +420,19 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
+  // ═══ WEB / LINK ═══
+  const webCmds = ['web','link','página','pagina','entrar web','abrir web','ver web','ir a la web','iniciar sesion web','iniciar sesión web','ir al portal','portal','dashboard','ir al dashboard','abrir dashboard','usar web','abrir app','ir a la app','la app','la web','entrar','entrar al sistema','sistema','plataforma','ver mis datos','ver datos','datos web','mis datos web','ingresar','ingresar a la web','acceder','acceso web','login','entrar a micaja','abrir micaja','micaja web','ver micaja','mi cuenta web','mi cuenta','ver cuenta'];
+  if (webCmds.includes(lower) || webCmds.some(c => lower.includes(c))) {
+    await sendWhatsApp(phone,
+      `🌐 *Accede a MiCaja desde la web:*\n\n` +
+      `👉 milkomercios.in/MiCaja/login.html\n\n` +
+      `📱 Tu número: *${phone}*\n` +
+      `🔐 Tu PIN: *${user.pin}*\n\n` +
+      `_Ingresa con tu número y PIN para ver tus datos, gráficos e informes completos._`
+    );
+    return;
+  }
+
   // ═══ PAGAR / SUSCRIPCIÓN ═══
   if (['pagar','suscripción','suscripcion','pago','mi suscripción','activar','renovar','pagar micaja'].includes(lower)) {
     try {
