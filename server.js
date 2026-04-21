@@ -547,6 +547,37 @@ app.delete('/api/payment-methods/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
+
+// Generar o recuperar token público de pagos del usuario
+app.post('/api/payment-methods/:userId/token', async (req, res) => {
+  try {
+    const { data: user } = await supabase.from('users').select('id, name, pay_token').eq('id', req.params.userId).single();
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (user.pay_token) return res.json({ ok: true, token: user.pay_token });
+    const token = require('crypto').randomBytes(12).toString('hex');
+    await supabase.from('users').update({ pay_token: token }).eq('id', req.params.userId);
+    res.json({ ok: true, token });
+  } catch (err) { res.status(500).json({ error: 'Error al generar token' }); }
+});
+
+// Resetear token — el anterior deja de funcionar
+app.post('/api/payment-methods/:userId/token/reset', async (req, res) => {
+  try {
+    const token = require('crypto').randomBytes(12).toString('hex');
+    await supabase.from('users').update({ pay_token: token }).eq('id', req.params.userId);
+    res.json({ ok: true, token });
+  } catch (err) { res.status(500).json({ error: 'Error al regenerar token' }); }
+});
+
+// Endpoint público — ver métodos de pago por token (sin autenticación)
+app.get('/api/pagos-publico/:token', async (req, res) => {
+  try {
+    const { data: user } = await supabase.from('users').select('id, name, phone').eq('pay_token', req.params.token).single();
+    if (!user) return res.status(404).json({ error: 'Link no válido o expirado' });
+    const { data: methods } = await supabase.from('payment_methods').select('tipo, numero, titular, descripcion, banco').eq('user_id', user.id).order('created_at', { ascending: false });
+    res.json({ ok: true, name: user.name, methods: methods || [] });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
 app.get('/api/travel-friends/:userId', async (req, res) => {
   try {
     const { data } = await supabase.from('travel_friends').select('*').eq('user_id', req.params.userId).order('name');
