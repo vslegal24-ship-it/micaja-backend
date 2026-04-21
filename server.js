@@ -181,9 +181,16 @@ app.get('/api/summary/:userId', async (req, res) => {
 app.post('/api/trips', async (req, res) => {
   try {
     const { user_id, name, members } = req.body;
-    const { data: trip, error } = await supabase.from('trips').insert({ user_id, name }).select().single();
+    const { data: trip, error } = await supabase.from('trips').insert({ user_id, name, status: 'active' }).select().single();
     if (error) throw error;
-    if (members && members.length > 0) await supabase.from('trip_members').insert(members.map(m => ({ trip_id: trip.id, name: m })));
+    if (members && members.length > 0) {
+      const rows = members.map(m => ({
+        trip_id: trip.id,
+        name: typeof m === 'string' ? m : m.name,
+        phone: typeof m === 'object' ? (m.phone || null) : null
+      }));
+      await supabase.from('trip_members').insert(rows);
+    }
     res.json({ ok: true, trip });
   } catch (err) { res.status(500).json({ error: 'Error al crear viaje' }); }
 });
@@ -193,6 +200,99 @@ app.get('/api/trips/:userId', async (req, res) => {
     const { data } = await supabase.from('trips').select('*, trip_members(*), trip_expenses(*)').eq('user_id', req.params.userId).order('created_at', { ascending: false });
     res.json({ ok: true, trips: data || [] });
   } catch (err) { res.status(500).json({ error: 'Error al obtener viajes' }); }
+});
+
+// Editar nombre o estado del viaje
+app.put('/api/trips/:id', async (req, res) => {
+  try {
+    const { name, status } = req.body;
+    const updates = {};
+    if (name) updates.name = name;
+    if (status) updates.status = status;
+    const { data, error } = await supabase.from('trips').update(updates).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ ok: true, trip: data });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar' }); }
+});
+
+// Eliminar viaje
+app.delete('/api/trips/:id', async (req, res) => {
+  try {
+    await supabase.from('trip_expenses').delete().eq('trip_id', req.params.id);
+    await supabase.from('trip_members').delete().eq('trip_id', req.params.id);
+    await supabase.from('trips').delete().eq('id', req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error al eliminar' }); }
+});
+
+// Finalizar viaje — calcula balances y envía WhatsApp a cada miembro
+app.post('/api/trips/:id/finalizar', async (req, res) => {
+  try {
+    const { user_phone } = req.body;
+    const { data: trip } = await supabase.from('trips').select('*, trip_members(*), trip_expenses(*)').eq('id', req.params.id).single();
+    if (!trip) return res.status(404).json({ error: 'Viaje no encontrado' });
+
+    const members = trip.trip_members || [];
+    const expenses = trip.trip_expenses || [];
+    const total = expenses.reduce((s, e) => s + Number(e.amount), 0);
+    const balances = {};
+    members.forEach(m => balances[m.name] = 0);
+    expenses.forEach(exp => {
+      balances[exp.payer] = (balances[exp.payer] || 0) + Number(exp.amount);
+      const split = exp.split_between || members.map(m => m.name);
+      const share = Number(exp.amount) / split.length;
+      split.forEach(n => { balances[n] = (balances[n] || 0) - share; });
+    });
+
+    // Calcular deudas
+    const debts = [];
+    const dc = Object.entries(balances).filter(([,v]) => v < 0).sort((a,b) => a[1]-b[1]).map(([n,v]) => [n,v]);
+    const cc = Object.entries(balances).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]).map(([n,v]) => [n,v]);
+    let i=0, j=0;
+    while (i < dc.length && j < cc.length) {
+      const amt = Math.min(-dc[i][1], cc[j][1]);
+      if (amt > 1) debts.push({ from: dc[i][0], to: cc[j][0], amount: Math.round(amt) });
+      dc[i][1] += amt; cc[j][1] -= amt;
+      if (Math.abs(dc[i][1]) < 1) i++;
+      if (Math.abs(cc[j][1]) < 1) j++;
+    }
+
+    const fecha = new Date().toLocaleDateString('es-CO', { day:'2-digit', month:'long', year:'numeric' });
+    const phonesSent = [];
+
+    for (const member of members) {
+      if (!member.phone) continue;
+      const phone = member.phone.replace(/[\s\-\+\(\)]/g,'').replace(/^0/,'').replace(/^57/,'57');
+      const finalPhone = phone.startsWith('57') ? phone : '57' + phone;
+      const myBalance = Math.round(balances[member.name] || 0);
+      const myDebts = debts.filter(d => d.from === member.name);
+      const myCredits = debts.filter(d => d.to === member.name);
+
+      let msg = `✈️ *Viaje: ${trip.name}*\n📅 ${fecha}\n━━━━━━━━━━━━━\n`;
+      msg += `Hola *${member.name}*!\n\n`;
+      msg += `💰 Gasto total: *$${total.toLocaleString()}*\n`;
+      msg += `📊 Tu balance: *${myBalance>=0?'+':''}$${myBalance.toLocaleString()}*\n\n`;
+      if (myDebts.length) { msg += `💸 *Debes pagarle a:*\n`; myDebts.forEach(d => { msg += `  • ${d.to}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
+      if (myCredits.length) { msg += `💵 *Te deben pagarte:*\n`; myCredits.forEach(d => { msg += `  • ${d.from}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
+      if (!myDebts.length && !myCredits.length) msg += `✅ ¡Estás al día!\n\n`;
+      msg += `_Enviado desde MiCaja_`;
+
+      await sendWhatsApp(finalPhone, msg);
+      phonesSent.push(member.name);
+    }
+
+    if (user_phone) {
+      await sendWhatsApp(user_phone,
+        `🏁 *Viaje "${trip.name}" finalizado*\n💰 Total: *$${total.toLocaleString()}*\n👥 ${members.map(m=>m.name).join(', ')}\n${phonesSent.length?`📱 Resumen enviado a: ${phonesSent.join(', ')}`:'(Sin números registrados)'}`
+      );
+    }
+
+    await supabase.from('trips').update({ status: 'finished' }).eq('id', req.params.id);
+    res.json({ ok: true, sent: phonesSent.length, total });
+  } catch (err) {
+    console.error('Finalizar error:', err);
+    res.status(500).json({ error: 'Error al finalizar viaje' });
+  }
 });
 
 app.post('/api/trips/:tripId/expenses', async (req, res) => {
