@@ -422,33 +422,15 @@ async function processWhatsAppMessage(phone, text) {
 
   // ═══ PAGAR / SUSCRIPCIÓN ═══
   if (['pagar','suscripción','suscripcion','pago','mi suscripción','activar','renovar','pagar micaja'].includes(lower)) {
-    try {
-      const orderId = `MICAJA-${user.id.slice(0,8)}-${Date.now()}`;
-      const amount = '2000000';
-      const currency = 'COP';
-      const integString = `${orderId}${amount}${currency}${BOLD_SECRET_KEY}`;
-      const integritySignature = require('crypto').createHash('sha256').update(integString).digest('hex');
-
-      // Guardar pago pendiente
-      await supabase.from('payments').insert({
-        user_id: user.id, amount: 20000, method: 'bold',
-        reference: orderId, status: 'pending',
-        period_start: new Date().toISOString().split('T')[0],
-        period_end: new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0]
-      });
-
-      const boldUrl = `https://checkout.bold.co/payment/link?amount=${amount}&currency=${currency}&orderId=${orderId}&integrity=${integritySignature}&apiKey=${BOLD_API_KEY}&redirectionUrl=${encodeURIComponent('https://milkomercios.in/MiCaja/dashboard.html')}&description=${encodeURIComponent('MiCaja Suscripción mensual')}`;
-
-      await sendWhatsApp(phone,
-        `💳 *Suscripción MiCaja*\n\n` +
-        `📋 Acceso completo a todos los módulos\n` +
-        `💰 *$20.000 COP / mes*\n` +
-        `💳 Tarjeta, PSE, Nequi\n\n` +
-        `👇 Paga de forma segura:\n${boldUrl}`
-      );
-    } catch(e) {
-      await sendWhatsApp(phone, `💳 Para pagar tu suscripción entra a:\n🌐 milkomercios.in/MiCaja/dashboard.html`);
-    }
+    await sendWhatsApp(phone,
+      `💳 *Suscripción MiCaja*\n\n` +
+      `📋 Acceso completo a todos los módulos\n` +
+      `💰 *$20.000 COP / mes*\n` +
+      `💳 Paga con tarjeta, PSE o Nequi\n\n` +
+      `👇 Ingresa aquí para activar:\n` +
+      `🌐 milkomercios.in/MiCaja/dashboard.html\n\n` +
+      `_(Haz clic en el botón "Activar — $20.000 COP/mes")_`
+    );
     return;
   }
   if (['borrar último','borrar ultimo','borrar','eliminar último','eliminar ultimo','deshacer'].includes(lower)) {
@@ -750,7 +732,7 @@ app.post('/api/payments/create', async (req, res) => {
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
     const orderId = `MICAJA-${user_id.slice(0,8)}-${Date.now()}`;
-    const amount = '2000000'; // $20.000 COP en centavos (sin decimales)
+    const amount = '20000'; // $20.000 COP en centavos (sin decimales)
     const currency = 'COP';
 
     // Hash de integridad: orderId + amount + currency + secretKey
