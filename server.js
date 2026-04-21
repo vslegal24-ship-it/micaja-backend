@@ -863,6 +863,27 @@ app.get('/api/admin/users/:id/data', verifyAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al obtener datos' }); }
 });
 
+// Obtener configuración del usuario (ingresos de pareja, etc.)
+app.get('/api/users/:id/config', async (req, res) => {
+  try {
+    const { data } = await supabase.from('user_config').select('*').eq('user_id', req.params.id).single();
+    res.json({ ok: true, config: data || null });
+  } catch (err) { res.json({ ok: true, config: null }); }
+});
+
+// Guardar configuración del usuario
+app.post('/api/users/:id/config', async (req, res) => {
+  try {
+    const { partner_name, partner_income_a, partner_income_b } = req.body;
+    const { data, error } = await supabase.from('user_config').upsert({
+      user_id: req.params.id, partner_name, partner_income_a, partner_income_b,
+      updated_at: new Date()
+    }, { onConflict: 'user_id' }).select().single();
+    if (error) throw error;
+    res.json({ ok: true, config: data });
+  } catch (err) { res.status(500).json({ error: 'Error al guardar configuración' }); }
+});
+
 // Actualizar datos del usuario (nombre negocio, nombre, etc.)
 app.put('/api/users/:id', async (req, res) => {
   try {
