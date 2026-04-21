@@ -409,6 +409,77 @@ async function sendWhatsApp(to, message) {
   } catch (err) { console.error('WA Error:', err.response?.data || err.message); }
 }
 
+// ══════════════════════════════════════
+// ADMIN — Middleware de verificación
+// ══════════════════════════════════════
+async function verifyAdmin(req, res, next) {
+  const phone = req.headers['x-admin-phone'];
+  if (!phone) return res.status(401).json({ error: 'No autorizado' });
+  const { data: user } = await supabase.from('users').select('role').eq('phone', phone).single();
+  if (!user || user.role !== 'admin') return res.status(403).json({ error: 'Solo administradores' });
+  next();
+}
+
+// Listar todos los usuarios con conteo de movimientos
+app.get('/api/admin/users', verifyAdmin, async (req, res) => {
+  try {
+    const { data: users } = await supabase.from('users').select('*').order('created_at', { ascending: false });
+    if (!users) return res.json({ ok: true, users: [] });
+
+    // Para cada usuario, contar movimientos y calcular volumen
+    const enriched = await Promise.all(users.map(async u => {
+      const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', u.id);
+      const count = (movs || []).length;
+      const volume = (movs || []).reduce((s, m) => s + Number(m.amount), 0);
+      const { pin: _, ...safeUser } = u;
+      return { ...safeUser, movement_count: count, total_volume: volume };
+    }));
+
+    res.json({ ok: true, users: enriched });
+  } catch (err) { res.status(500).json({ error: 'Error al obtener usuarios' }); }
+});
+
+// Editar usuario (PIN, rol, estado, plan, nombre)
+app.put('/api/admin/users/:id', verifyAdmin, async (req, res) => {
+  try {
+    const { name, pin, plan, role, status } = req.body;
+    const updates = {};
+    if (name !== undefined) updates.name = name;
+    if (pin && pin.length === 4 && /^\d{4}$/.test(pin)) updates.pin = pin;
+    if (plan) updates.plan = plan;
+    if (role) updates.role = role;
+    if (status) updates.status = status;
+
+    const { data, error } = await supabase.from('users').update(updates).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    const { pin: _, ...safeUser } = data;
+    res.json({ ok: true, user: safeUser });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar usuario' }); }
+});
+
+// Ver datos completos de un usuario (para admin)
+app.get('/api/admin/users/:id/data', verifyAdmin, async (req, res) => {
+  try {
+    const { data: user } = await supabase.from('users').select('*').eq('id', req.params.id).single();
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', req.params.id).order('created_at', { ascending: false });
+    const { data: trips } = await supabase.from('trips').select('*, trip_expenses(*)').eq('user_id', req.params.id);
+
+    const income = (movs || []).filter(m => m.type === 'income').reduce((s, m) => s + Number(m.amount), 0);
+    const expense = (movs || []).filter(m => m.type === 'expense').reduce((s, m) => s + Number(m.amount), 0);
+
+    const { pin: _, ...safeUser } = user;
+    res.json({
+      ok: true,
+      user: safeUser,
+      summary: { income, expense, balance: income - expense, count: (movs || []).length },
+      movements: movs || [],
+      trips: trips || []
+    });
+  } catch (err) { res.status(500).json({ error: 'Error al obtener datos' }); }
+});
+
 // ══════ INICIAR ══════
 app.listen(PORT, () => {
   console.log(`⚡ MiCaja Backend v2 en puerto ${PORT}`);
