@@ -486,7 +486,54 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ═══ WEB / LINK ═══
+  // ═══ DEUDAS ═══
+  if (['mis deudas','deudas','qué debo','que debo','cuánto debo','cuanto debo','me deben','qué me deben','que me deben'].includes(lower)) {
+    try {
+      const { data: debts } = await supabase.from('debts').select('*').eq('user_id', user.id).eq('status', 'pending').or('status.eq.partial');
+      const debo = (debts || []).filter(d => d.type === 'debo');
+      const meDeben = (debts || []).filter(d => d.type === 'me_deben');
+      const totalDebo = debo.reduce((s,d) => s + Number(d.amount) - Number(d.paid || 0), 0);
+      const totalMeDeben = meDeben.reduce((s,d) => s + Number(d.amount) - Number(d.paid || 0), 0);
+
+      let msg = `🤝 *Mis Deudas*\n\n`;
+      msg += `💸 Yo debo: *$${totalDebo.toLocaleString()}*\n`;
+      msg += `💵 Me deben: *$${totalMeDeben.toLocaleString()}*\n`;
+      msg += `⚖️ Balance: *${totalMeDeben - totalDebo >= 0 ? '+' : ''}$${(totalMeDeben - totalDebo).toLocaleString()}*\n\n`;
+
+      if (debo.length) {
+        msg += `📋 *Lo que debo:*\n`;
+        debo.slice(0,5).forEach(d => { msg += `  • ${d.person_name}: $${(Number(d.amount)-Number(d.paid||0)).toLocaleString()}\n`; });
+      }
+      if (meDeben.length) {
+        msg += `\n📋 *Lo que me deben:*\n`;
+        meDeben.slice(0,5).forEach(d => { msg += `  • ${d.person_name}: $${(Number(d.amount)-Number(d.paid||0)).toLocaleString()}\n`; });
+      }
+      msg += `\n🌐 Ver completo: milkomercios.in/MiCaja/deudas.html`;
+      await sendWhatsApp(phone, msg);
+    } catch(e) {
+      await sendWhatsApp(phone, `🤝 Para ver tus deudas entra a:\n🌐 milkomercios.in/MiCaja/deudas.html`);
+    }
+    return;
+  }
+
+  // Registrar deuda por WhatsApp: "le debo 50mil a Juan", "Carlos me debe 80mil"
+  const deboMatch = lower.match(/(?:le debo|debo)\s+(\d+[\d.,]*\s*(?:mil|k|m)?)\s+(?:a|le a)?\s*(.+)/i);
+  const meDebenMatch = lower.match(/(.+)\s+me debe\s+(\d+[\d.,]*\s*(?:mil|k|m)?)/i);
+
+  if (deboMatch) {
+    const amountRaw = deboMatch[1]; const persona = deboMatch[2].trim();
+    const amount = parseFloat(amountRaw.replace(/mil|k/i,'').replace(/[.,]/g,'')) * (amountRaw.match(/mil|k/i) ? 1000 : 1);
+    await supabase.from('debts').insert({ user_id: user.id, type: 'debo', person_name: persona, amount, status: 'pending', paid: 0 });
+    await sendWhatsApp(phone, `💸 Deuda registrada:\nLe debes *$${amount.toLocaleString()}* a *${persona}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
+    return;
+  }
+  if (meDebenMatch) {
+    const persona = meDebenMatch[1].trim(); const amountRaw = meDebenMatch[2];
+    const amount = parseFloat(amountRaw.replace(/mil|k/i,'').replace(/[.,]/g,'')) * (amountRaw.match(/mil|k/i) ? 1000 : 1);
+    await supabase.from('debts').insert({ user_id: user.id, type: 'me_deben', person_name: persona, amount, status: 'pending', paid: 0 });
+    await sendWhatsApp(phone, `💵 Deuda registrada:\n*${persona}* te debe *$${amount.toLocaleString()}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
+    return;
+  }
   const webCmds = ['web','link','página','pagina','entrar web','abrir web','ver web','ir a la web','iniciar sesion web','iniciar sesión web','ir al portal','portal','dashboard','ir al dashboard','abrir dashboard','usar web','abrir app','ir a la app','la app','la web','entrar','entrar al sistema','sistema','plataforma','ver mis datos','ver datos','datos web','mis datos web','ingresar','ingresar a la web','acceder','acceso web','login','entrar a micaja','abrir micaja','micaja web','ver micaja','mi cuenta web','mi cuenta','ver cuenta'];
   if (webCmds.includes(lower) || webCmds.some(c => lower.includes(c))) {
     await sendWhatsApp(phone,
@@ -806,8 +853,53 @@ app.get('/api/admin/users/:id/data', verifyAdmin, async (req, res) => {
 });
 
 // ══════════════════════════════════════
-// BOLD PAGOS
+// DEUDAS — Qué debo / Qué me deben
 // ══════════════════════════════════════
+app.get('/api/debts/:userId', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('debts').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ ok: true, debts: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Error al obtener deudas' }); }
+});
+
+app.post('/api/debts', async (req, res) => {
+  try {
+    const { user_id, type, person_name, amount, description, due_date, note } = req.body;
+    if (!user_id || !type || !person_name || !amount) return res.status(400).json({ error: 'Campos requeridos' });
+    const { data, error } = await supabase.from('debts').insert({ user_id, type, person_name, amount, description, due_date: due_date || null, note, status: 'pending', paid: 0 }).select().single();
+    if (error) throw error;
+    res.json({ ok: true, debt: data });
+  } catch (err) { res.status(500).json({ error: 'Error al crear deuda' }); }
+});
+
+app.post('/api/debts/:id/abono', async (req, res) => {
+  try {
+    const { amount } = req.body;
+    const { data: debt } = await supabase.from('debts').select('amount, paid').eq('id', req.params.id).single();
+    if (!debt) return res.status(404).json({ error: 'No encontrada' });
+    const newPaid = Number(debt.paid || 0) + Number(amount);
+    const newStatus = newPaid >= Number(debt.amount) ? 'paid' : 'partial';
+    const { data, error } = await supabase.from('debts').update({ paid: newPaid, status: newStatus }).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ ok: true, debt: data });
+  } catch (err) { res.status(500).json({ error: 'Error al registrar abono' }); }
+});
+
+app.put('/api/debts/:id/paid', async (req, res) => {
+  try {
+    const { data: debt } = await supabase.from('debts').select('amount').eq('id', req.params.id).single();
+    await supabase.from('debts').update({ status: 'paid', paid: debt.amount }).eq('id', req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
+
+app.delete('/api/debts/:id', async (req, res) => {
+  try {
+    await supabase.from('debts').delete().eq('id', req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
 const crypto = require('crypto');
 
 // Generar link de pago directo por teléfono (para WhatsApp)
