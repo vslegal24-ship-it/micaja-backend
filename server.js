@@ -300,17 +300,30 @@ app.post('/api/trips/recordatorio', async (req, res) => {
       `_Para que *${to_name}* deje de enviarte estos recordatorios automáticos, pídele que marque la deuda como pagada en MiCaja una vez hagas la transferencia._ 😊\n\n` +
       `_MiCaja · milkomercios.in/MiCaja_`;
 
-    await sendWhatsApp(finalPhone, msg);
+    // Verificar si el deudor está registrado en MiCaja
+    const { data: registrado } = await supabase.from('users').select('id').eq('phone', finalPhone).single();
 
-    if (sender_phone) {
-      await sendWhatsApp(sender_phone,
-        `✅ Recordatorio enviado a *${from_name}*\n` +
-        `💸 Saldo pendiente: *$${pendiente.toLocaleString()} COP*\n` +
-        `✈️ Viaje: *${trip_name}*`
-      );
+    if (registrado) {
+      // Puede recibir mensajes directos
+      await sendWhatsApp(finalPhone, msg);
+      if (sender_phone) {
+        await sendWhatsApp(sender_phone,
+          `✅ Recordatorio enviado a *${from_name}*\n` +
+          `💸 Saldo pendiente: *$${pendiente.toLocaleString()} COP*\n` +
+          `✈️ Viaje: *${trip_name}*`
+        );
+      }
+    } else {
+      // No registrado — enviar el texto al organizador para que lo reenvíe manualmente
+      if (sender_phone) {
+        await sendWhatsApp(sender_phone,
+          `⚠️ *${from_name}* no tiene cuenta en MiCaja, el bot no puede escribirle directamente.\n\n` +
+          `📋 *Reenvíale este mensaje manualmente:*\n\n` + msg
+        );
+      }
     }
 
-    res.json({ ok: true });
+    res.json({ ok: true, direct: !!registrado });
   } catch (err) { res.status(500).json({ error: 'Error al enviar recordatorio' }); }
 });
 app.post('/api/trips/:id/finalizar', async (req, res) => {
@@ -351,37 +364,84 @@ app.post('/api/trips/:id/finalizar', async (req, res) => {
     }
 
     const fecha = new Date().toLocaleDateString('es-CO', { day:'2-digit', month:'long', year:'numeric' });
-    const phonesSent = [];
+    const phonesSent = [];    // enviado directo
+    const phonesNoReg = [];   // sin cuenta MiCaja — se le dice al organizador
 
     for (const member of members) {
       if (!member.phone) continue;
-      const phone = member.phone.replace(/[\s\-\+\(\)]/g,'').replace(/^0/,'').replace(/^57/,'57');
-      const finalPhone = phone.startsWith('57') ? phone : '57' + phone;
+
+      // Normalizar teléfono
+      const rawPhone = member.phone.replace(/[\s\-\+\(\)]/g,'').replace(/^0/,'');
+      const finalPhone = rawPhone.startsWith('57') ? rawPhone : '57' + rawPhone;
+
+      // Verificar si está registrado en MiCaja (ya escribió al bot antes)
+      const { data: registrado } = await supabase.from('users').select('id,name').eq('phone', finalPhone).single();
+
       const myBalance = Math.round(balances[member.name] || 0);
       const myDebts = debts.filter(d => d.from === member.name);
       const myCredits = debts.filter(d => d.to === member.name);
 
-      let msg = `✈️ *Viaje: ${trip.name}*\n📅 ${fecha}\n━━━━━━━━━━━━━\n`;
+      let msg = `✈️ *Resumen del viaje: ${trip.name}*\n📅 ${fecha}\n━━━━━━━━━━━━━\n`;
       msg += `Hola *${member.name}*!\n\n`;
-      msg += `💰 Gasto total: *$${total.toLocaleString()}*\n`;
+      msg += `💰 Gasto total del grupo: *$${total.toLocaleString()}*\n`;
       msg += `📊 Tu balance: *${myBalance>=0?'+':''}$${myBalance.toLocaleString()}*\n\n`;
       if (myDebts.length) { msg += `💸 *Debes pagarle a:*\n`; myDebts.forEach(d => { msg += `  • ${d.to}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
       if (myCredits.length) { msg += `💵 *Te deben pagarte:*\n`; myCredits.forEach(d => { msg += `  • ${d.from}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
-      if (!myDebts.length && !myCredits.length) msg += `✅ ¡Estás al día!\n\n`;
-      msg += `_Enviado desde MiCaja_`;
+      if (!myDebts.length && !myCredits.length) msg += `✅ ¡Estás al día! No debes nada.\n\n`;
+      msg += `_Enviado desde MiCaja · milkomercios.in/MiCaja_`;
 
-      await sendWhatsApp(finalPhone, msg);
-      phonesSent.push(member.name);
+      if (registrado) {
+        // Está registrado en MiCaja — puede recibir mensajes directos del bot
+        await sendWhatsApp(finalPhone, msg);
+        phonesSent.push(member.name);
+      } else {
+        // No registrado — intentar con template si está configurado en Railway
+        const templateName = process.env.WA_TEMPLATE_RESUMEN;
+        if (templateName) {
+          const myDebtsText = myDebts.length
+            ? myDebts.map(d => `Debes a ${d.to}: $${d.amount.toLocaleString()}`).join(', ')
+            : myCredits.length
+            ? myCredits.map(d => `${d.from} te debe: $${d.amount.toLocaleString()}`).join(', ')
+            : 'Estas al dia ✅';
+          await sendWhatsAppTemplate(finalPhone, templateName, [
+            member.name,
+            trip.name,
+            '$' + total.toLocaleString(),
+            (myBalance >= 0 ? '+' : '') + '$' + myBalance.toLocaleString(),
+            myDebtsText
+          ]);
+          phonesSent.push(member.name);
+        } else {
+          // Sin template configurado — avisar al organizador para reenvío manual
+          phonesNoReg.push({ name: member.name, phone: finalPhone, msg });
+        }
+      }
     }
 
+    // Notificar al organizador
     if (user_phone) {
-      await sendWhatsApp(user_phone,
-        `🏁 *Viaje "${trip.name}" finalizado*\n💰 Total: *$${total.toLocaleString()}*\n👥 ${members.map(m=>m.name).join(', ')}\n${phonesSent.length?`📱 Resumen enviado a: ${phonesSent.join(', ')}`:'(Sin números registrados)'}`
-      );
+      let orgMsg = `🏁 *Viaje "${trip.name}" finalizado*\n💰 Total: *$${total.toLocaleString()}*\n\n`;
+
+      if (phonesSent.length) {
+        orgMsg += `✅ Resumen enviado directamente a:\n${phonesSent.map(n=>`  • ${n}`).join('\n')}\n\n`;
+      }
+
+      if (phonesNoReg.length) {
+        orgMsg += `⚠️ *Los siguientes no tienen cuenta en MiCaja* — reenvíales este resumen manualmente:\n\n`;
+        phonesNoReg.forEach(p => {
+          orgMsg += `👤 *${p.name}* (${p.phone}):\n${p.msg}\n\n`;
+        });
+      }
+
+      if (!phonesSent.length && !phonesNoReg.length) {
+        orgMsg += `(Sin participantes con número registrado)`;
+      }
+
+      await sendWhatsApp(user_phone, orgMsg);
     }
 
     await supabase.from('trips').update({ status: 'finished' }).eq('id', req.params.id);
-    res.json({ ok: true, sent: phonesSent.length, total });
+    res.json({ ok: true, sent: phonesSent.length, noReg: phonesNoReg.length, total });
   } catch (err) {
     console.error('Finalizar error:', err);
     res.status(500).json({ error: 'Error al finalizar viaje' });
@@ -462,8 +522,31 @@ app.get('/api/trips/:tripId/balance', async (req, res) => {
 });
 
 // ══════════════════════════════════════
-// AMIGOS VIAJEROS
+// MÉTODOS DE PAGO DEL USUARIO
 // ══════════════════════════════════════
+app.get('/api/payment-methods/:userId', async (req, res) => {
+  try {
+    const { data } = await supabase.from('payment_methods').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
+    res.json({ ok: true, methods: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
+
+app.post('/api/payment-methods', async (req, res) => {
+  try {
+    const { user_id, tipo, numero, titular, descripcion, banco } = req.body;
+    if (!user_id || !tipo || !numero || !titular) return res.status(400).json({ error: 'Campos requeridos' });
+    const { data, error } = await supabase.from('payment_methods').insert({ user_id, tipo, numero, titular, descripcion: descripcion||null, banco: banco||null }).select().single();
+    if (error) throw error;
+    res.json({ ok: true, method: data });
+  } catch (err) { res.status(500).json({ error: 'Error al guardar' }); }
+});
+
+app.delete('/api/payment-methods/:id', async (req, res) => {
+  try {
+    await supabase.from('payment_methods').delete().eq('id', req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
 app.get('/api/travel-friends/:userId', async (req, res) => {
   try {
     const { data } = await supabase.from('travel_friends').select('*').eq('user_id', req.params.userId).order('name');
@@ -1062,6 +1145,34 @@ async function sendWhatsApp(to, message) {
     await axios.post(`https://graph.facebook.com/v18.0/${WA_PHONE_ID}/messages`, { messaging_product: 'whatsapp', to: phone, type: 'text', text: { body: message } }, { headers: { 'Authorization': `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
     console.log(`✅ WA → ${phone}`);
   } catch (err) { console.error('WA Error:', err.response?.data || err.message); }
+}
+
+// Enviar usando template aprobado por Meta (puede iniciar conversación con cualquier número)
+// Usar cuando el destinatario NO ha escrito al bot antes
+// Template name: micaja_resumen_viaje (debe estar aprobado en Meta Business Manager)
+async function sendWhatsAppTemplate(to, templateName, params) {
+  if (!WA_TOKEN || !WA_PHONE_ID) { console.log(`[WA TEMPLATE SIM] → ${to}: ${templateName}`); return; }
+  try {
+    const phone = to.replace(/[+\s-]/g, '');
+    const components = [];
+    if (params && params.length) {
+      components.push({
+        type: 'body',
+        parameters: params.map(p => ({ type: 'text', text: String(p) }))
+      });
+    }
+    await axios.post(`https://graph.facebook.com/v18.0/${WA_PHONE_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to: phone,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: 'es' },
+        components
+      }
+    }, { headers: { 'Authorization': `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
+    console.log(`✅ WA Template "${templateName}" → ${phone}`);
+  } catch (err) { console.error('WA Template Error:', err.response?.data || err.message); }
 }
 
 // ══════════════════════════════════════
