@@ -18,6 +18,8 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const WA_TOKEN = process.env.WA_TOKEN;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN || 'micaja_verify_2026';
 const WA_PHONE_ID = process.env.WA_PHONE_ID;
+const BOLD_API_KEY = process.env.BOLD_API_KEY;
+const BOLD_SECRET_KEY = process.env.BOLD_SECRET_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -418,7 +420,24 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ═══ BORRAR ═══
+  // ═══ PAGAR / SUSCRIPCIÓN ═══
+  if (['pagar','suscripción','suscripcion','pago','mi suscripción','activar','renovar','pagar micaja'].includes(lower)) {
+    try {
+      const res2 = await axios.post(`https://micaja-backend-production.up.railway.app/api/payments/create`, { user_id: user.id });
+      if (res2.data.ok) {
+        await sendWhatsApp(phone,
+          `💳 *Suscripción MiCaja*\n\n` +
+          `📋 Plan: Acceso completo a todos los módulos\n` +
+          `💰 Valor: *$20.000 COP / mes*\n` +
+          `💳 Métodos: Tarjeta, PSE, Nequi\n\n` +
+          `👇 Haz clic para pagar de forma segura:\n${res2.data.url}`
+        );
+      }
+    } catch(e) {
+      await sendWhatsApp(phone, `💳 Para pagar tu suscripción entra a:\n🌐 milkomercios.in/MiCaja/dashboard.html`);
+    }
+    return;
+  }
   if (['borrar último','borrar ultimo','borrar','eliminar último','eliminar ultimo','deshacer'].includes(lower)) {
     const module = user.plan || 'personal';
     const { data: last } = await supabase.from('movements').select('id, description, amount, type, category').eq('user_id', user.id).eq('module', module).order('created_at',{ascending:false}).limit(1).single();
@@ -703,9 +722,129 @@ app.get('/api/admin/users/:id/data', verifyAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al obtener datos' }); }
 });
 
+// ══════════════════════════════════════
+// BOLD PAGOS
+// ══════════════════════════════════════
+const crypto = require('crypto');
+
+// Generar link de pago Bold
+app.post('/api/payments/create', async (req, res) => {
+  try {
+    const { user_id, phone } = req.body;
+    if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
+
+    const { data: user } = await supabase.from('users').select('name, phone').eq('id', user_id).single();
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    const orderId = `MICAJA-${user_id.slice(0,8)}-${Date.now()}`;
+    const amount = 2000000; // $20.000 COP en centavos
+
+    // Generar hash de integridad Bold
+    // Formato: orderId + amount + currency + secret
+    const integString = `${orderId}${amount}COP${BOLD_SECRET_KEY}`;
+    const integrity = crypto.createHash('sha256').update(integString).digest('hex');
+
+    // Registrar pago pendiente en Supabase
+    await supabase.from('payments').insert({
+      user_id, amount: 20000, method: 'bold',
+      reference: orderId, status: 'pending',
+      period_start: new Date().toISOString().split('T')[0],
+      period_end: new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0]
+    });
+
+    // URL del botón Bold (checkout embebido)
+    const boldUrl = `https://checkout.bold.co/payment/link?amount=${amount}&currency=COP&orderId=${orderId}&integrity=${integrity}&apiKey=${BOLD_API_KEY}&redirectionUrl=${encodeURIComponent('https://milkomercios.in/MiCaja/dashboard.html')}&description=${encodeURIComponent('MiCaja - Suscripción mensual')}`;
+
+    res.json({ ok: true, url: boldUrl, orderId });
+  } catch (err) {
+    console.error('Bold create error:', err);
+    res.status(500).json({ error: 'Error al crear pago' });
+  }
+});
+
+// Webhook de confirmación de pago Bold
+app.post('/api/payments/bold-webhook', async (req, res) => {
+  try {
+    const event = req.body;
+    console.log('💳 Bold webhook:', JSON.stringify(event));
+
+    // Verificar que el pago fue aprobado
+    if (event.type !== 'TRANSACTION' || event.data?.transaction?.status !== 'APPROVED') {
+      return res.sendStatus(200);
+    }
+
+    const orderId = event.data?.transaction?.order_id || event.data?.transaction?.orderId;
+    if (!orderId) return res.sendStatus(200);
+
+    // Extraer user_id del orderId (formato: MICAJA-{userId8chars}-{timestamp})
+    const parts = orderId.split('-');
+    if (parts.length < 2) return res.sendStatus(200);
+    const userIdPrefix = parts[1];
+
+    // Buscar el pago pendiente
+    const { data: payment } = await supabase
+      .from('payments')
+      .select('*, users(*)')
+      .ilike('reference', `MICAJA-${userIdPrefix}%`)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (!payment) return res.sendStatus(200);
+
+    // Actualizar pago a pagado
+    await supabase.from('payments').update({ status: 'paid' }).eq('id', payment.id);
+
+    // Activar usuario si estaba inactivo
+    await supabase.from('users').update({ status: 'active' }).eq('id', payment.user_id);
+
+    // Notificar por WhatsApp
+    const userPhone = payment.users?.phone;
+    if (userPhone && WA_TOKEN) {
+      await sendWhatsApp(userPhone,
+        `✅ *¡Pago recibido!*\n\n` +
+        `💰 $20.000 COP — MiCaja mensual\n` +
+        `📅 Válido hasta: ${payment.period_end}\n` +
+        `🔢 Ref: ${orderId}\n\n` +
+        `¡Gracias! Tu acceso está activo 🚀\n` +
+        `Sigue usando MiCaja por WhatsApp o en:\n` +
+        `🌐 milkomercios.in/MiCaja/dashboard.html`
+      );
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('Bold webhook error:', err);
+    res.sendStatus(200);
+  }
+});
+
+// Consultar estado de suscripción
+app.get('/api/payments/status/:userId', async (req, res) => {
+  try {
+    const { data: payment } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('user_id', req.params.userId)
+      .eq('status', 'paid')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (!payment) return res.json({ ok: true, active: false });
+
+    const expired = payment.period_end < new Date().toISOString().split('T')[0];
+    res.json({ ok: true, active: !expired, payment });
+  } catch (err) {
+    res.json({ ok: true, active: false });
+  }
+});
+
 // ══════ INICIAR ══════
 app.listen(PORT, () => {
   console.log(`⚡ MiCaja Backend v2 en puerto ${PORT}`);
   console.log(`📊 Supabase: ${SUPABASE_URL ? '✅' : '⚠️'}`);
   console.log(`📱 WhatsApp: ${WA_TOKEN ? '✅' : '⚠️ simulado'}`);
+  console.log(`💳 Bold: ${BOLD_API_KEY ? '✅' : '⚠️ sin configurar'}`);
 });
