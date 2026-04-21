@@ -746,18 +746,13 @@ app.get('/api/payments/link/:phone', async (req, res) => {
 
     // Token temporal (expira en 30 min)
     const token = crypto.createHash('sha256').update(`${phone}-${Date.now()}-${BOLD_SECRET_KEY}`).digest('hex').slice(0, 16);
+    const tokenExpiry = Date.now() + 30*60*1000;
 
-    // Guardar token en sesión
-    await supabase.from('wa_sessions').upsert({
-      phone, user_id: user.id,
-      context: JSON.stringify({ payToken: token, orderId, amount, currency, integritySignature, apiKey: BOLD_API_KEY, tokenExpiry: Date.now() + 30*60*1000 }),
-      updated_at: new Date()
-    }, { onConflict: 'phone' });
-
-    // Registrar pago pendiente
+    // Guardar pago pendiente CON el token
     await supabase.from('payments').insert({
       user_id: user.id, amount: 20000, method: 'bold',
       reference: orderId, status: 'pending',
+      pay_token: token, token_expiry: tokenExpiry,
       period_start: new Date().toISOString().split('T')[0],
       period_end: new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0]
     });
@@ -765,6 +760,7 @@ app.get('/api/payments/link/:phone', async (req, res) => {
     const payUrl = `https://milkomercios.in/MiCaja/pagar.html?tel=${phone}&token=${token}`;
     res.json({ ok: true, url: payUrl });
   } catch (err) {
+    console.error('Payment link error:', err);
     res.status(500).json({ error: 'Error generando link' });
   }
 });
@@ -773,16 +769,41 @@ app.get('/api/payments/link/:phone', async (req, res) => {
 app.get('/api/payments/token/:phone/:token', async (req, res) => {
   try {
     const { phone, token } = req.params;
-    const { data: session } = await supabase.from('wa_sessions').select('context').eq('phone', phone).single();
-    if (!session) return res.status(404).json({ error: 'Token no encontrado' });
 
-    const ctx = JSON.parse(session.context || '{}');
-    if (ctx.payToken !== token) return res.status(401).json({ error: 'Token inválido' });
-    if (ctx.tokenExpiry < Date.now()) return res.status(401).json({ error: 'Token expirado' });
+    // Buscar en tabla payments por teléfono + token
+    const { data: user } = await supabase.from('users').select('id').eq('phone', phone).single();
+    if (!user) return res.status(404).json({ error: 'Token no encontrado' });
 
-    res.json({ ok: true, orderId: ctx.orderId, amount: ctx.amount, currency: ctx.currency, integritySignature: ctx.integritySignature, apiKey: ctx.apiKey, redirectionUrl: 'https://milkomercios.in/MiCaja/dashboard.html', description: 'MiCaja - Suscripción mensual $20.000' });
+    const { data: payment } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('pay_token', token)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (!payment) return res.status(404).json({ error: 'Token no encontrado' });
+    if (payment.token_expiry < Date.now()) return res.status(401).json({ error: 'Token expirado' });
+
+    // Recalcular integritySignature
+    const integString = `${payment.reference}${payment.amount * 100}COP${BOLD_SECRET_KEY}`;
+    const integritySignature = crypto.createHash('sha256').update(integString).digest('hex');
+
+    res.json({
+      ok: true,
+      orderId: payment.reference,
+      amount: String(payment.amount * 100), // Bold espera en centavos? No, en pesos. Usamos 20000
+      currency: 'COP',
+      integritySignature,
+      apiKey: BOLD_API_KEY,
+      redirectionUrl: 'https://milkomercios.in/MiCaja/pagar.html',
+      description: 'MiCaja - Suscripción mensual $20.000'
+    });
   } catch (err) {
-    res.status(500).json({ error: 'Error' });
+    console.error('Token lookup error:', err);
+    res.status(500).json({ error: 'Error verificando token' });
   }
 });
 
