@@ -787,14 +787,14 @@ app.get('/api/payments/token/:phone/:token', async (req, res) => {
     if (!payment) return res.status(404).json({ error: 'Token no encontrado' });
     if (payment.token_expiry < Date.now()) return res.status(401).json({ error: 'Token expirado' });
 
-    // Recalcular integritySignature
-    const integString = `${payment.reference}${payment.amount * 100}COP${BOLD_SECRET_KEY}`;
+    // Recalcular integritySignature con el monto correcto en pesos
+    const integString = `${payment.reference}20000COP${BOLD_SECRET_KEY}`;
     const integritySignature = crypto.createHash('sha256').update(integString).digest('hex');
 
     res.json({
       ok: true,
       orderId: payment.reference,
-      amount: String(payment.amount * 100), // Bold espera en centavos? No, en pesos. Usamos 20000
+      amount: '20000',
       currency: 'COP',
       integritySignature,
       apiKey: BOLD_API_KEY,
