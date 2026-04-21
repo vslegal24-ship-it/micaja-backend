@@ -251,17 +251,39 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ═══ PIN ═══
-  if (['pin','mi pin','olvidé mi pin','olvide mi pin','recordar pin','recuperar pin','cual es mi pin','cuál es mi pin'].includes(lower)) {
-    await sendWhatsApp(phone, `🔐 Tu PIN es: *${user.pin}*\n\nPara cambiarlo escribe: _"cambiar pin 1234"_`);
+  // ═══ PIN — detección flexible ═══
+  const pinConsulta = /^(mi\s+)?pin$|^(cuál|cual)\s+es\s+mi\s+pin|^(olvidé|olvide|recuperar|recordar|ver)\s+(mi\s+)?pin|^pin\?$/i;
+  if (pinConsulta.test(lower)) {
+    await sendWhatsApp(phone, `🔐 Tu PIN es: *${user.pin}*\n\nPara cambiarlo escribe:\n_"cambiar pin 1234"_ (pon tus 4 dígitos)`);
     return;
   }
-  if (lower.startsWith('cambiar pin ')) {
-    const newPin = lower.replace('cambiar pin ','').trim();
-    if (newPin.length === 4 && /^\d{4}$/.test(newPin)) {
-      await supabase.from('users').update({ pin: newPin }).eq('id', user.id);
-      await sendWhatsApp(phone, `✅ PIN cambiado a *${newPin}* 🔒`);
-    } else { await sendWhatsApp(phone, `El PIN debe ser 4 números. Ej: _"cambiar pin 5678"_`); }
+  // Cambiar pin — acepta "cambiar pin 1234", "nuevo pin 1234", "pin 1234", "mi pin es 1234"
+  const pinCambio = lower.match(/(?:cambiar\s+pin|nuevo\s+pin|pin\s+nuevo|mi\s+pin\s+es)\s*(\d{4})/i) || lower.match(/^pin\s+(\d{4})$/i);
+  if (pinCambio) {
+    const newPin = pinCambio[1];
+    await supabase.from('users').update({ pin: newPin }).eq('id', user.id);
+    await sendWhatsApp(phone, `✅ PIN cambiado a *${newPin}* 🔒\n\nGuárdalo, lo necesitas para entrar a la web.`);
+    return;
+  }
+
+  // ═══ MÓDULO ACTIVO ═══
+  if (['mi módulo','mi modulo','qué módulo','que modulo','módulo actual','modulo actual'].includes(lower)) {
+    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+    await sendWhatsApp(phone, `📋 Tu módulo activo: *${planNames[user.plan]||user.plan}*\n\nPara cambiar: _"módulo personal"_, _"módulo pareja"_, _"módulo viajes"_, _"módulo negocio"_`);
+    return;
+  }
+  const moduloMatch = lower.match(/^módulo\s+(.+)|^modulo\s+(.+)/i);
+  if (moduloMatch) {
+    const req = (moduloMatch[1]||moduloMatch[2]).trim();
+    const planMap = {'personal':'personal','pareja':'parejas','parejas':'parejas','viaje':'viajes','viajes':'viajes','negocio':'comerciantes','comercio':'comerciantes','comerciante':'comerciantes'};
+    const plan = planMap[req];
+    if (plan) {
+      await supabase.from('users').update({ plan }).eq('id', user.id);
+      const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+      await sendWhatsApp(phone, `✅ Módulo cambiado a *${planNames[plan]}*\n\nAhora tus registros van a ese módulo 💪`);
+    } else {
+      await sendWhatsApp(phone, `Módulos: *personal*, *pareja*, *viajes*, *negocio*`);
+    }
     return;
   }
 
@@ -293,23 +315,66 @@ async function processWhatsAppMessage(phone, text) {
   if (['hola','hi','hey','buenas','buenos días','buenos dias','buenas tardes','buenas noches','qué más','que mas','inicio'].includes(lower)) {
     const hour = new Date(new Date().toLocaleString('en-US',{timeZone:'America/Bogota'})).getHours();
     const saludo = hour < 12 ? 'Buenos días' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
-    const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id);
+    const module = user.plan || 'personal';
+    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+    const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', module);
     const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
     await sendWhatsApp(phone,
       `${saludo} ${user.name||''}! 👋\n\n` +
-      `${movs&&movs.length ? `Tu balance: *$${bal.toLocaleString()}*\n\n` : ''}` +
-      `¿Qué necesitas?\n💸 _"pagué luz 80mil"_\n💵 _"vendí 350mil"_\n📊 _"cómo voy?"_\n🔐 _"pin"_\n❓ _"ayuda"_`
+      `Módulo: *${planNames[module]}*\n` +
+      `${movs&&movs.length ? `Balance: *$${bal.toLocaleString()}*\n` : ''}` +
+      `\n¿Qué necesitas?\n💸 _"pagué luz 80mil"_\n💵 _"me ingresaron 200mil"_\n📊 _"cómo voy?"_\n📄 _"informe"_\n🔐 _"pin"_\n❓ _"ayuda"_`
     );
     return;
   }
 
   // ═══ AYUDA ═══
   if (['ayuda','help','?','comandos','opciones','qué puedo hacer','que puedo hacer','menu','menú'].includes(lower)) {
+    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
     await sendWhatsApp(phone,
-      `📋 *Lo que puedo hacer:*\n\n` +
-      `💸 Gasto: _"pagué luz 80mil"_\n💵 Ingreso: _"vendí 350mil"_\n📊 Resumen: _"cómo voy?"_\n` +
-      `🗑 Borrar: _"borrar último"_\n🔐 PIN: _"pin"_ o _"cambiar pin 1234"_\n` +
-      `📋 Plan: _"mi plan"_ o _"plan pareja"_\n✍️ Nombre: _"me llamo Carlos"_`
+      `📋 *Comandos MiCaja:*\n\n` +
+      `💸 Gasto: _"pagué luz 80mil"_\n` +
+      `💵 Ingreso: _"me ingresaron 200mil"_\n` +
+      `📊 Resumen: _"cómo voy?"_\n` +
+      `📄 Informe: _"informe"_ o _"pdf"_\n` +
+      `🗑 Borrar: _"borrar"_\n` +
+      `🔐 Ver PIN: _"pin"_\n` +
+      `🔄 Cambiar PIN: _"cambiar pin 1234"_\n` +
+      `📋 Mi módulo: _"mi módulo"_\n` +
+      `🔀 Cambiar módulo: _"módulo negocio"_\n` +
+      `✍️ Nombre: _"me llamo Carlos"_\n\n` +
+      `Módulo activo: *${planNames[user.plan]||user.plan}*`
+    );
+    return;
+  }
+
+  // ═══ INFORME / PDF ═══
+  if (['informe','pdf','reporte','informe pdf','reporte pdf','mi informe','ver informe','informe del mes'].includes(lower)) {
+    const module = user.plan || 'personal';
+    const planNames = {personal:'Finanzas Personales',parejas:'Finanzas en Pareja',viajes:'Viajes',comerciantes:'Mi Negocio'};
+    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', module).order('date',{ascending:false});
+    const inc = (movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
+    const exp = (movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
+    const bal = inc-exp;
+    const byCat = {};
+    (movs||[]).filter(m=>m.type==='expense').forEach(m=>{byCat[m.category]=(byCat[m.category]||0)+Number(m.amount);});
+    const topCats = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,v])=>`  • ${c}: $${v.toLocaleString()}`).join('\n');
+    const last5 = (movs||[]).slice(0,5).map(m=>`  ${m.type==='income'?'💵':'💸'} ${m.description}: $${Number(m.amount).toLocaleString()}`).join('\n');
+    const fecha = new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
+    await sendWhatsApp(phone,
+      `📄 *Informe — ${planNames[module]}*\n` +
+      `📅 ${fecha} · ${user.name||'Usuario'}\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `💵 Ingresos: *$${inc.toLocaleString()}*\n` +
+      `💸 Gastos:   *$${exp.toLocaleString()}*\n` +
+      `${bal>=0?'✅':'⚠️'} Balance:  *$${bal.toLocaleString()}*\n` +
+      `📋 Total: ${(movs||[]).length} movimientos\n` +
+      `${inc>0?`🎯 Ahorro: ${Math.round((bal/inc)*100)}%\n`:'' }` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `${topCats?`📂 *Top gastos:*\n${topCats}\n━━━━━━━━━━━━━━━━\n`:''}` +
+      `🕐 *Últimos movimientos:*\n${last5||'  Sin movimientos'}\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `🌐 Ver completo:\nmilkomercios.in/MiCaja/${module}.html`
     );
     return;
   }
@@ -369,8 +434,17 @@ async function processWhatsAppMessage(phone, text) {
   }
 
   // ═══ NO ENTENDIÓ ═══
-  await sendWhatsApp(phone, `Mmm, no pillé eso 🤔\n\nPrueba:\n💸 _"pagué luz 80mil"_\n💵 _"vendí 350mil"_\n📊 _"cómo voy?"_\n🔐 _"pin"_\n\nO escribe *ayuda*`);
+  await sendWhatsApp(phone, `Mmm, no pillé eso 🤔\n\nPrueba así:\n💸 _"pagué luz 80mil"_\n💵 _"me ingresaron 200mil"_\n📊 _"cómo voy?"_\n📄 _"informe"_\n\nO escribe *ayuda* para ver todo.`);
 }
+
+// ══════ BUSCAR USUARIO POR TELÉFONO (para debug y sync) ══════
+app.get('/api/user/phone/:phone', async (req, res) => {
+  try {
+    const { data: user } = await supabase.from('users').select('id, name, phone, plan, role, status, created_at').eq('phone', req.params.phone).single();
+    if (!user) return res.status(404).json({ error: 'No encontrado' });
+    res.json({ ok: true, user });
+  } catch (err) { res.status(500).json({ error: 'Error' }); }
+});
 
 // ══════ PARSER FINANCIERO CON IA (Claude API) ══════
 async function parseWithAI(text, userName, plan) {
@@ -415,16 +489,49 @@ Mensaje: "${text}"`
 
 // ══════ PARSER FINANCIERO SIMPLE (fallback) ══════
 function parseFinancialMessage(text) {
-  let n = text.replace(/(\d+)\s*mil/gi, (_,x) => String(Number(x)*1000)).replace(/(\d+\.?\d*)\s*m(?:illones?)?/gi, (_,x) => String(Number(x)*1000000)).replace(/(\d+)k/gi, (_,x) => String(Number(x)*1000));
+  let n = text
+    .replace(/(\d+)\s*mil/gi, (_,x) => String(Number(x)*1000))
+    .replace(/(\d+\.?\d*)\s*m(?:illones?)?/gi, (_,x) => String(Number(x)*1000000))
+    .replace(/(\d+)k/gi, (_,x) => String(Number(x)*1000));
+
   const amtMatch = n.match(/\$?\s*([\d,.]+)/);
   if (!amtMatch) return null;
   const amount = parseFloat(amtMatch[1].replace(/[,.]/g, ''));
   if (!amount || amount <= 0) return null;
-  const incWords = ['vendí','vendi','cobré','cobre','ingreso','me pagaron','recibí','recibi','venta','gané','gane','salario','sueldo'];
-  let type = 'expense';
-  for (const w of incWords) { if (n.includes(w)) { type = 'income'; break; } }
-  let desc = n.replace(/\$?\s*[\d,.]+/g, '').replace(/pagué|pague|gasté|gaste|compré|compre|vendí|vendi|cobré|cobre|ingreso|me pagaron|recibí|recibi|gané|gane/gi, '').replace(/^\s*(de|en|por|el|la|un|una)\s+/i, '').trim();
-  if (!desc) desc = type === 'income' ? 'Ingreso' : 'Gasto';
+
+  // Palabras de INGRESO — mucho más amplio
+  const incWords = [
+    'vendí','vendi','cobré','cobre','ingreso','me pagaron','recibí','recibi',
+    'venta','gané','gane','salario','sueldo','ingresaron','me ingresaron',
+    'entró','entro','llegó','llego','depositaron','me depositaron',
+    'abonaron','me abonaron','pagaron','recaudo','recaudé','recaude',
+    'facturé','facture','cobré','cobre','honorarios','comisión','comision',
+    'transferencia','transfer','me cayó','me cayo','cayó','cayeron'
+  ];
+
+  // Palabras de GASTO — para confirmar gasto
+  const expWords = [
+    'pagué','pague','gasté','gaste','compré','compre','cobró','cobro',
+    'salió','salio','pagamos','compramos','gastamos','invertí','invert'
+  ];
+
+  let type = 'expense'; // default
+  const textLower = n.toLowerCase();
+  for (const w of incWords) { if (textLower.includes(w)) { type = 'income'; break; } }
+  // Si detectó income pero también tiene palabra de gasto explícita, verificar contexto
+  if (type === 'expense') {
+    for (const w of expWords) { if (textLower.includes(w)) { type = 'expense'; break; } }
+  }
+
+  // Limpiar descripción
+  let desc = n
+    .replace(/\$?\s*[\d,.]+/g, '')
+    .replace(/pagué|pague|gasté|gaste|compré|compre|vendí|vendi|cobré|cobre|ingreso|me pagaron|recibí|recibi|gané|gane|ingresaron|me ingresaron|entró|entro|llegó|llego|depositaron|me depositaron/gi, '')
+    .replace(/^\s*(de|en|por|el|la|un|una|los|las|del|al)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!desc || desc.length < 2) desc = type === 'income' ? 'Ingreso' : 'Gasto';
   desc = desc.charAt(0).toUpperCase() + desc.slice(1);
   return { type, amount, description: desc, category: autoCategory(desc, type) };
 }
