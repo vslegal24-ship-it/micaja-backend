@@ -682,10 +682,10 @@ async function processWhatsAppMessage(phone, text) {
   async function clearCtx() { if (session) await supabase.from('wa_sessions').update({ context: '{}' }).eq('id', session.id); }
 
   // ═══ REGISTRO PASO 1: elegir plan ═══
-  if (!user && ['registrar','registro','empezar','comenzar'].includes(lower)) {
+  if (!user && ['registrar','registro','registrarme','empezar','comenzar','crear cuenta','nueva cuenta','quiero registrarme'].includes(lower)) {
     await setCtx({ step: 'register_plan' });
     await sendWhatsApp(phone,
-      `🎉 ¡Vamos a crear tu cuenta!\n\n¿Para qué quieres usar MiCaja?\n\n` +
+      `🎉 ¡Bienvenido a *MiCaja*!\n\n¿Para qué quieres usarla?\n\n` +
       `*1.* 👤 Personal — mis gastos diarios\n` +
       `*2.* 💑 Pareja — finanzas juntos\n` +
       `*3.* ✈️ Viajes — dividir cuentas\n` +
@@ -723,7 +723,15 @@ async function processWhatsAppMessage(phone, text) {
 
   // Sin cuenta
   if (!user) {
-    await sendWhatsApp(phone, `👋 ¡Hey! Soy *MiCaja* ⚡ Tu asistente de finanzas.\n\nEscribe *registrar* y en 30 segundos tienes cuenta.\n\nO entra a la web:\n🌐 milkomercios.in/MiCaja/MiCaja.html`);
+    await sendWhatsApp(phone,
+      `👋 ¡Hola! Soy *MiCajaBot* 🤖\n\n` +
+      `Para usar MiCaja necesitas una cuenta.\n\n` +
+      `Escribe *registrarme* y te ayudo a crearla en 30 segundos 🚀\n\n` +
+      `Ya con cuenta puedes:\n` +
+      `💸 Registrar gastos e ingresos\n` +
+      `✈️ Gestionar viajes con amigos\n` +
+      `📊 Ver tus finanzas al instante`
+    );
     return;
   }
 
