@@ -28,34 +28,100 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'MiCaja Backend', version: '2.0.0', timestamp: new Date().toISOString() });
 });
 
+// Función para normalizar teléfono colombiano — siempre 57XXXXXXXXXX
+function normalizePhone(phone) {
+  let p = phone.replace(/[\s\-\+\(\)]/g, ''); // quitar espacios, guiones, +, paréntesis
+  if (p.startsWith('57') && p.length === 12) return p; // ya tiene 57
+  if (p.length === 10 && p.startsWith('3')) return '57' + p; // colombiano sin código
+  if (p.startsWith('0057')) return p.slice(2); // 0057...
+  return p; // devolver como está si no encaja
+}
+
 // ══════ AUTH ══════
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { phone, name, pin, plan, partner_phone, partner_name, business_name } = req.body;
-    if (!phone || !pin || pin.length !== 4) return res.status(400).json({ error: 'Teléfono y PIN de 4 dígitos requeridos' });
+    const { phone: rawPhone, name, pin, plan, partner_phone, partner_name, business_name } = req.body;
+    if (!rawPhone || !pin || pin.length !== 4) return res.status(400).json({ error: 'Teléfono y PIN de 4 dígitos requeridos' });
+    const phone = normalizePhone(rawPhone);
     const { data: existing } = await supabase.from('users').select('id').eq('phone', phone).single();
     if (existing) return res.status(409).json({ error: 'Este número ya tiene cuenta' });
-    const { data, error } = await supabase.from('users').insert({ phone, name, pin, plan: plan || 'personal', partner_phone, partner_name, business_name }).select().single();
+
+    // Generar código de verificación de 6 dígitos
+    const verifyCode = String(Math.floor(100000 + Math.random() * 900000));
+    const verifyExpiry = Date.now() + 10 * 60 * 1000; // 10 minutos
+
+    // Guardar usuario pendiente de verificación
+    const { data, error } = await supabase.from('users').insert({
+      phone, name, pin, plan: plan || 'personal',
+      partner_phone, partner_name, business_name,
+      status: 'pending', // pendiente hasta verificar
+      verify_code: verifyCode, verify_expiry: verifyExpiry
+    }).select().single();
     if (error) throw error;
-    const { pin: _, ...user } = data;
-    res.json({ ok: true, user });
-  } catch (err) { res.status(500).json({ error: 'Error al registrar' }); }
+
+    // Enviar código por WhatsApp
+    await sendWhatsApp(phone,
+      `👋 ¡Hola ${name || ''}! Bienvenido a *MiCaja*\n\n` +
+      `🔢 Tu código de verificación es:\n\n` +
+      `*${verifyCode}*\n\n` +
+      `⏱ Expira en 10 minutos.\n` +
+      `Ingrésalo en la web para activar tu cuenta.`
+    );
+
+    const { pin: _, verify_code: __, ...user } = data;
+    res.json({ ok: true, user, needsVerification: true });
+  } catch (err) {
+    console.error('Register error:', err);
+    res.status(500).json({ error: 'Error al registrar' });
+  }
+});
+
+// Verificar código de WhatsApp
+app.post('/api/auth/verify', async (req, res) => {
+  try {
+    const { phone: rawPhone, code } = req.body;
+    const phone = normalizePhone(rawPhone);
+    const { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (user.verify_code !== code) return res.status(401).json({ error: 'Código incorrecto' });
+    if (user.verify_expiry < Date.now()) return res.status(401).json({ error: 'Código expirado. Regístrate de nuevo.' });
+
+    // Activar cuenta
+    await supabase.from('users').update({ status: 'active', verify_code: null, verify_expiry: null }).eq('id', user.id);
+
+    // Mensaje de bienvenida
+    await sendWhatsApp(phone,
+      `✅ *¡Cuenta verificada!*\n\n` +
+      `Bienvenido a MiCaja ${user.name || ''}.\n\n` +
+      `📱 Puedes usarme aquí por WhatsApp o desde:\n` +
+      `🌐 milkomercios.in/MiCaja/login.html\n\n` +
+      `Escribe *ayuda* para ver todo lo que puedo hacer.`
+    );
+
+    const { pin: _, verify_code: __, ...safeUser } = user;
+    res.json({ ok: true, user: { ...safeUser, status: 'active' } });
+  } catch (err) {
+    res.status(500).json({ error: 'Error al verificar' });
+  }
 });
 
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { phone, pin } = req.body;
-    if (!phone || !pin) return res.status(400).json({ error: 'Teléfono y PIN requeridos' });
+    const { phone: rawPhone, pin } = req.body;
+    if (!rawPhone || !pin) return res.status(400).json({ error: 'Teléfono y PIN requeridos' });
+    const phone = normalizePhone(rawPhone);
     const { data: user, error } = await supabase.from('users').select('*').eq('phone', phone).eq('pin', pin).single();
     if (error || !user) return res.status(401).json({ error: 'Número o PIN incorrecto' });
-    const { pin: _, ...safeUser } = user;
+    if (user.status === 'pending') return res.status(403).json({ error: 'Cuenta pendiente de verificación. Revisa tu WhatsApp.' });
+    const { pin: _, verify_code: __, ...safeUser } = user;
     res.json({ ok: true, user: safeUser });
   } catch (err) { res.status(500).json({ error: 'Error al ingresar' }); }
 });
 
 app.post('/api/auth/reset-pin', async (req, res) => {
   try {
-    const { phone } = req.body;
+    const { phone: rawPhone } = req.body;
+    const phone = normalizePhone(rawPhone);
     const { data: user } = await supabase.from('users').select('id, name').eq('phone', phone).single();
     if (!user) return res.status(404).json({ error: 'No hay cuenta con ese número' });
     const newPin = String(Math.floor(1000 + Math.random() * 9000));
