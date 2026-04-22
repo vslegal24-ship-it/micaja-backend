@@ -284,13 +284,70 @@ app.post('/api/auth/reset-pin', rateLimit(3, 10), async (req, res) => {
 // ══════ MOVIMIENTOS ══════
 app.get('/api/movements/:userId', async (req, res) => {
   try {
-    const { module } = req.query;
+    const { module, period } = req.query;
     let query = supabase.from('movements').select('*').eq('user_id', req.params.userId).order('date', { ascending: false }).limit(200);
     if (module) query = query.eq('module', module);
+    // Si piden el mes actual (sin period), solo los del período abierto
+    if (!period) query = query.is('period_id', null);
+    // Si piden un período específico
+    if (period) query = query.eq('period_id', period);
     const { data, error } = await query;
     if (error) throw error;
     res.json({ ok: true, movements: data });
   } catch (err) { res.status(500).json({ error: 'Error al obtener movimientos' }); }
+});
+
+// Cerrar mes — archiva movimientos del período actual
+app.post('/api/movements/:userId/close-period', async (req, res) => {
+  try {
+    const { module, label } = req.body; // label = "Enero 2026"
+    if (!module || !label) return res.status(400).json({ error: 'module y label requeridos' });
+
+    // Obtener movimientos abiertos del módulo
+    const { data: movs } = await supabase.from('movements')
+      .select('*').eq('user_id', req.params.userId)
+      .eq('module', module).is('period_id', null);
+
+    if (!movs || movs.length === 0) return res.status(400).json({ error: 'No hay movimientos para cerrar' });
+
+    // Calcular resumen del período
+    const income = movs.filter(m => m.type === 'income').reduce((s, m) => s + Number(m.amount), 0);
+    const expense = movs.filter(m => m.type === 'expense').reduce((s, m) => s + Number(m.amount), 0);
+
+    // Crear registro del período
+    const { data: period, error: pErr } = await supabase.from('periods').insert({
+      user_id: req.params.userId,
+      module,
+      label,
+      income,
+      expense,
+      balance: income - expense,
+      movements_count: movs.length,
+      closed_at: new Date().toISOString()
+    }).select().single();
+
+    if (pErr) throw pErr;
+
+    // Marcar todos los movimientos con el period_id
+    await supabase.from('movements')
+      .update({ period_id: period.id })
+      .eq('user_id', req.params.userId)
+      .eq('module', module)
+      .is('period_id', null);
+
+    res.json({ ok: true, period, summary: { income, expense, balance: income - expense, count: movs.length } });
+  } catch (err) { console.error('Close period error:', err); res.status(500).json({ error: 'Error al cerrar período' }); }
+});
+
+// Obtener historial de períodos cerrados
+app.get('/api/periods/:userId', async (req, res) => {
+  try {
+    const { module } = req.query;
+    let query = supabase.from('periods').select('*').eq('user_id', req.params.userId).order('closed_at', { ascending: false });
+    if (module) query = query.eq('module', module);
+    const { data } = await query;
+    res.json({ ok: true, periods: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Error al obtener períodos' }); }
 });
 
 app.post('/api/movements', async (req, res) => {
