@@ -7,6 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -23,96 +24,108 @@ const BOLD_SECRET_KEY = process.env.BOLD_SECRET_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ══════════════════════════════════════
+// FASE 1.1 — RATE LIMITING
+// Protege contra bots y abuso sin afectar usuarios normales
+// Límites generosos: nadie legítimo los alcanza
+// ══════════════════════════════════════
+const rateLimitStore = new Map(); // { key: { count, resetAt } }
+
+function rateLimit(maxPerMinute, maxPerHour) {
+  return (req, res, next) => {
+    // Identificar por IP + teléfono si viene en el body
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip || 'unknown';
+    const phone = req.body?.phone || req.params?.phone || '';
+    const key = phone ? `${ip}:${phone}` : ip;
+    const now = Date.now();
+
+    // Limpiar entradas viejas cada 1000 requests
+    if (rateLimitStore.size > 1000) {
+      for (const [k, v] of rateLimitStore) {
+        if (v.hourResetAt < now) rateLimitStore.delete(k);
+      }
+    }
+
+    const entry = rateLimitStore.get(key) || {
+      minCount: 0, minResetAt: now + 60000,
+      hourCount: 0, hourResetAt: now + 3600000
+    };
+
+    // Reset contadores si expiró la ventana
+    if (entry.minResetAt < now) { entry.minCount = 0; entry.minResetAt = now + 60000; }
+    if (entry.hourResetAt < now) { entry.hourCount = 0; entry.hourResetAt = now + 3600000; }
+
+    entry.minCount++;
+    entry.hourCount++;
+    rateLimitStore.set(key, entry);
+
+    if (entry.minCount > maxPerMinute) {
+      console.warn(`⚠️ Rate limit (min) alcanzado: ${key}`);
+      return res.status(429).json({ error: 'Demasiadas peticiones. Espera un momento.' });
+    }
+    if (entry.hourCount > maxPerHour) {
+      console.warn(`⚠️ Rate limit (hora) alcanzado: ${key}`);
+      return res.status(429).json({ error: 'Límite de peticiones alcanzado. Intenta en una hora.' });
+    }
+    next();
+  };
+}
+
+// Rate limit para WhatsApp — más estricto para evitar spam del bot
+const waMessageStore = new Map(); // { phone: { count, resetAt } }
+
+function rateLimitWA(phone, maxPerDay = 100, maxPerMinute = 10) {
+  const now = Date.now();
+  const entry = waMessageStore.get(phone) || {
+    dayCount: 0, dayResetAt: now + 86400000,
+    minCount: 0, minResetAt: now + 60000
+  };
+  if (entry.dayResetAt < now) { entry.dayCount = 0; entry.dayResetAt = now + 86400000; }
+  if (entry.minResetAt < now) { entry.minCount = 0; entry.minResetAt = now + 60000; }
+  entry.dayCount++;
+  entry.minCount++;
+  waMessageStore.set(phone, entry);
+  if (entry.minCount > maxPerMinute) return { blocked: true, reason: 'minuto' };
+  if (entry.dayCount > maxPerDay) return { blocked: true, reason: 'dia' };
+  return { blocked: false };
+}
+
 // ══════ HEALTH CHECK ══════
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'MiCaja Backend', version: '2.0.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'MiCaja Backend', version: '2.1.0', timestamp: new Date().toISOString() });
 });
 
 // Función para normalizar teléfono colombiano — siempre 57XXXXXXXXXX
 function normalizePhone(phone) {
-  let p = phone.replace(/[\s\-\+\(\)]/g, ''); // quitar espacios, guiones, +, paréntesis
-  if (p.startsWith('57') && p.length === 12) return p; // ya tiene 57
-  if (p.length === 10 && p.startsWith('3')) return '57' + p; // colombiano sin código
-  if (p.startsWith('0057')) return p.slice(2); // 0057...
-  return p; // devolver como está si no encaja
-}
-
-// ══════════════════════════════════════
-// SESIÓN CON TOKEN — generado en login,
-// validado en todos los endpoints protegidos
-// ══════════════════════════════════════
-const crypto = require('crypto');
-
-function generateSessionToken() {
-  return crypto.randomBytes(32).toString('hex');
-}
-
-// Middleware — verifica que el token de sesión sea válido
-// y que el userId del token coincida con el de la URL
-async function verifySession(req, res, next) {
-  try {
-    const token = req.headers['x-session-token'];
-    const userIdFromUrl = req.params.userId || req.params.id || req.body?.user_id;
-
-    if (!token) return res.status(401).json({ error: 'Sesión requerida' });
-
-    // Buscar token en Supabase
-    const { data: session } = await supabase
-      .from('sessions')
-      .select('user_id, expires_at')
-      .eq('token', token)
-      .single();
-
-    if (!session) return res.status(401).json({ error: 'Sesión inválida' });
-    if (new Date(session.expires_at) < new Date()) {
-      await supabase.from('sessions').delete().eq('token', token);
-      return res.status(401).json({ error: 'Sesión expirada. Ingresa de nuevo.' });
-    }
-
-    // Si la URL tiene un userId, verificar que coincida con el token
-    if (userIdFromUrl && userIdFromUrl !== session.user_id) {
-      return res.status(403).json({ error: 'Sin acceso a estos datos' });
-    }
-
-    // Agregar user_id al request para usarlo en el endpoint
-    req.sessionUserId = session.user_id;
-    next();
-  } catch (err) {
-    res.status(401).json({ error: 'Error de sesión' });
-  }
+  let p = phone.replace(/[\s\-\+\(\)]/g, '');
+  if (p.startsWith('57') && p.length === 12) return p;
+  if (p.length === 10 && p.startsWith('3')) return '57' + p;
+  if (p.startsWith('0057')) return p.slice(2);
+  return p;
 }
 
 // ══════ AUTH ══════
-app.post('/api/auth/register', async (req, res) => {
+// Rate limit en login: 10 intentos/min, 30/hora (protege contra fuerza bruta)
+app.post('/api/auth/register', rateLimit(5, 20), async (req, res) => {
   try {
     const { phone: rawPhone, name, pin, plan, partner_phone, partner_name, business_name } = req.body;
     if (!rawPhone || !pin || pin.length !== 4) return res.status(400).json({ error: 'Teléfono y PIN de 4 dígitos requeridos' });
     const phone = normalizePhone(rawPhone);
     const { data: existing } = await supabase.from('users').select('id').eq('phone', phone).single();
     if (existing) return res.status(409).json({ error: 'Este número ya tiene cuenta' });
-
-    // Generar código de verificación de 6 dígitos
     const verifyCode = String(Math.floor(100000 + Math.random() * 900000));
-    const verifyExpiry = Date.now() + 10 * 60 * 1000; // 10 minutos
-
-    // Guardar usuario pendiente de verificación
+    const verifyExpiry = Date.now() + 10 * 60 * 1000;
     const { data, error } = await supabase.from('users').insert({
       phone, name, pin, plan: plan || 'personal',
       partner_phone, partner_name, business_name,
-      status: 'pending', // pendiente hasta verificar
+      status: 'pending',
       verify_code: verifyCode, verify_expiry: verifyExpiry
     }).select().single();
     if (error) throw error;
-
-    // Enviar código por WhatsApp
     await sendWhatsApp(phone,
       `👋 ¡Hola ${name || ''}! Bienvenido a *MiCaja*\n\n` +
-      `🔢 Tu código de verificación es:\n\n` +
-      `*${verifyCode}*\n\n` +
-      `⏱ Expira en 10 minutos.\n` +
-      `Ingrésalo en la web para activar tu cuenta.`
+      `🔢 Tu código de verificación es:\n\n*${verifyCode}*\n\n⏱ Expira en 10 minutos.\nIngrésalo en la web para activar tu cuenta.`
     );
-
     const { pin: _, verify_code: __, ...user } = data;
     res.json({ ok: true, user, needsVerification: true });
   } catch (err) {
@@ -121,8 +134,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// Verificar código de WhatsApp
-app.post('/api/auth/verify', async (req, res) => {
+app.post('/api/auth/verify', rateLimit(10, 30), async (req, res) => {
   try {
     const { phone: rawPhone, code } = req.body;
     const phone = normalizePhone(rawPhone);
@@ -130,19 +142,10 @@ app.post('/api/auth/verify', async (req, res) => {
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
     if (user.verify_code !== code) return res.status(401).json({ error: 'Código incorrecto' });
     if (user.verify_expiry < Date.now()) return res.status(401).json({ error: 'Código expirado. Regístrate de nuevo.' });
-
-    // Activar cuenta
     await supabase.from('users').update({ status: 'active', verify_code: null, verify_expiry: null }).eq('id', user.id);
-
-    // Mensaje de bienvenida
     await sendWhatsApp(phone,
-      `✅ *¡Cuenta verificada!*\n\n` +
-      `Bienvenido a MiCaja ${user.name || ''}.\n\n` +
-      `📱 Puedes usarme aquí por WhatsApp o desde:\n` +
-      `🌐 milkomercios.in/MiCaja/login.html\n\n` +
-      `Escribe *ayuda* para ver todo lo que puedo hacer.`
+      `✅ *¡Cuenta verificada!*\n\nBienvenido a MiCaja ${user.name || ''}.\n\n📱 Puedes usarme aquí por WhatsApp o desde:\n🌐 milkomercios.in/MiCaja/login.html\n\nEscribe *ayuda* para ver todo lo que puedo hacer.`
     );
-
     const { pin: _, verify_code: __, ...safeUser } = user;
     res.json({ ok: true, user: { ...safeUser, status: 'active' } });
   } catch (err) {
@@ -150,7 +153,8 @@ app.post('/api/auth/verify', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+// Login con rate limit anti fuerza bruta
+app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
   try {
     const { phone: rawPhone, pin } = req.body;
     if (!rawPhone || !pin) return res.status(400).json({ error: 'Teléfono y PIN requeridos' });
@@ -159,26 +163,12 @@ app.post('/api/auth/login', async (req, res) => {
     if (error || !user) return res.status(401).json({ error: 'Número o PIN incorrecto' });
     if (user.status === 'pending') return res.status(403).json({ error: 'Cuenta pendiente de verificación. Revisa tu WhatsApp.' });
     if (user.status === 'inactive') return res.status(403).json({ error: 'Cuenta inactiva. Contacta soporte.' });
-
-    // Generar token de sesión (expira en 30 días)
-    const sessionToken = generateSessionToken();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-
-    // Guardar sesión — eliminar sesiones viejas del mismo usuario primero
-    await supabase.from('sessions').delete().eq('user_id', user.id);
-    await supabase.from('sessions').insert({
-      user_id: user.id,
-      token: sessionToken,
-      expires_at: expiresAt,
-      created_at: new Date().toISOString()
-    });
-
     const { pin: _, verify_code: __, ...safeUser } = user;
-    res.json({ ok: true, user: safeUser, sessionToken });
+    res.json({ ok: true, user: safeUser });
   } catch (err) { res.status(500).json({ error: 'Error al ingresar' }); }
 });
 
-app.post('/api/auth/reset-pin', async (req, res) => {
+app.post('/api/auth/reset-pin', rateLimit(3, 10), async (req, res) => {
   try {
     const { phone: rawPhone } = req.body;
     const phone = normalizePhone(rawPhone);
@@ -192,10 +182,9 @@ app.post('/api/auth/reset-pin', async (req, res) => {
 });
 
 // ══════ MOVIMIENTOS ══════
-// Obtener movimientos filtrados por módulo
 app.get('/api/movements/:userId', async (req, res) => {
   try {
-    const { module } = req.query; // ?module=personal o ?module=comerciantes
+    const { module } = req.query;
     let query = supabase.from('movements').select('*').eq('user_id', req.params.userId).order('date', { ascending: false }).limit(200);
     if (module) query = query.eq('module', module);
     const { data, error } = await query;
@@ -262,7 +251,6 @@ app.get('/api/trips/:userId', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al obtener viajes' }); }
 });
 
-// Agregar miembro a viaje existente
 app.post('/api/trips/:id/members', async (req, res) => {
   try {
     const { name, phone } = req.body;
@@ -273,7 +261,6 @@ app.post('/api/trips/:id/members', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al agregar miembro' }); }
 });
 
-// Actualizar teléfono de miembro
 app.put('/api/trips/:tripId/members/:memberId', async (req, res) => {
   try {
     const { phone, name } = req.body;
@@ -286,7 +273,6 @@ app.put('/api/trips/:tripId/members/:memberId', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al actualizar miembro' }); }
 });
 
-// Eliminar miembro del viaje
 app.delete('/api/trips/:tripId/members/:memberId', async (req, res) => {
   try {
     await supabase.from('trip_members').delete().eq('id', req.params.memberId);
@@ -294,7 +280,6 @@ app.delete('/api/trips/:tripId/members/:memberId', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al eliminar miembro' }); }
 });
 
-// Editar nombre o estado del viaje
 app.put('/api/trips/:id', async (req, res) => {
   try {
     const { name, status } = req.body;
@@ -307,7 +292,6 @@ app.put('/api/trips/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al actualizar' }); }
 });
 
-// Eliminar viaje
 app.delete('/api/trips/:id', async (req, res) => {
   try {
     await supabase.from('trip_expenses').delete().eq('trip_id', req.params.id);
@@ -317,19 +301,15 @@ app.delete('/api/trips/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al eliminar' }); }
 });
 
-// Registrar pago/abono de deuda en viaje
 app.post('/api/trips/:id/debt-payments', async (req, res) => {
   try {
     const { debt_key, amount, from_name, to_name } = req.body;
-    const { data, error } = await supabase.from('trip_debt_payments').insert({
-      trip_id: req.params.id, debt_key, amount, from_name, to_name
-    }).select().single();
+    const { data, error } = await supabase.from('trip_debt_payments').insert({ trip_id: req.params.id, debt_key, amount, from_name, to_name }).select().single();
     if (error) throw error;
     res.json({ ok: true, payment: data });
   } catch (err) { res.status(500).json({ error: 'Error al registrar pago' }); }
 });
 
-// Obtener pagos de deudas de un viaje
 app.get('/api/trips/:id/debt-payments', async (req, res) => {
   try {
     const { data } = await supabase.from('trip_debt_payments').select('*').eq('trip_id', req.params.id);
@@ -337,7 +317,6 @@ app.get('/api/trips/:id/debt-payments', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
 
-// Enviar recordatorio de deuda por WhatsApp
 app.post('/api/trips/recordatorio', async (req, res) => {
   try {
     const { phone, from_name, to_name, amount, total, trip_name, sender_phone } = req.body;
@@ -350,54 +329,34 @@ app.post('/api/trips/recordatorio', async (req, res) => {
     const msg =
       `🤖 Hola *${from_name}*, soy *MiCajaBot* 👋\n\n` +
       `Te escribo de parte de *${to_name}* para recordarte amablemente que tienes un saldo pendiente del viaje:\n\n` +
-      `✈️ *${trip_name}*\n` +
-      `━━━━━━━━━━━━━━━━\n` +
+      `✈️ *${trip_name}*\n━━━━━━━━━━━━━━━━\n` +
       `💸 Deuda original: *$${totalOriginal.toLocaleString()} COP*\n` +
-      (abonado > 0 ? `✅ Ya abonaste: *$${abonado.toLocaleString()} COP*\n` : ``) +
-      `⚠️ Saldo pendiente: *$${pendiente.toLocaleString()} COP*\n` +
-      `━━━━━━━━━━━━━━━━\n\n` +
-      `*${to_name}* puso ese dinero de su bolsillo por ti durante el viaje. Cuando puedas coordina el pago con él/ella.\n\n` +
-      `_Para que *${to_name}* deje de enviarte estos recordatorios automáticos, pídele que marque la deuda como pagada en MiCaja una vez hagas la transferencia._ 😊\n\n` +
+      (abonado > 0 ? `✅ Ya abonaste: *$${abonado.toLocaleString()} COP*\n` : '') +
+      `⚠️ Saldo pendiente: *$${pendiente.toLocaleString()} COP*\n━━━━━━━━━━━━━━━━\n\n` +
+      `*${to_name}* puso ese dinero de su bolsillo por ti durante el viaje.\n\n` +
+      `_Para quitarte de estos recordatorios, pídele a *${to_name}* que marque la deuda como pagada en MiCaja._ 😊\n\n` +
       `_MiCaja · milkomercios.in/MiCaja_`;
 
-    // Verificar si el deudor está registrado en MiCaja
     const { data: registrado } = await supabase.from('users').select('id').eq('phone', finalPhone).single();
-
     if (registrado) {
-      // Puede recibir mensajes directos
       await sendWhatsApp(finalPhone, msg);
-      if (sender_phone) {
-        await sendWhatsApp(sender_phone,
-          `✅ Recordatorio enviado a *${from_name}*\n` +
-          `💸 Saldo pendiente: *$${pendiente.toLocaleString()} COP*\n` +
-          `✈️ Viaje: *${trip_name}*`
-        );
-      }
+      if (sender_phone) await sendWhatsApp(sender_phone, `✅ Recordatorio enviado a *${from_name}*\n💸 Saldo: $${pendiente.toLocaleString()} COP\n✈️ Viaje: *${trip_name}*`);
     } else {
-      // No registrado — enviar el texto al organizador para que lo reenvíe manualmente
-      if (sender_phone) {
-        await sendWhatsApp(sender_phone,
-          `⚠️ *${from_name}* no tiene cuenta en MiCaja, el bot no puede escribirle directamente.\n\n` +
-          `📋 *Reenvíale este mensaje manualmente:*\n\n` + msg
-        );
-      }
+      if (sender_phone) await sendWhatsApp(sender_phone, `⚠️ *${from_name}* no tiene cuenta en MiCaja.\n\n📋 *Reenvíale manualmente:*\n\n` + msg);
     }
-
     res.json({ ok: true, direct: !!registrado });
   } catch (err) { res.status(500).json({ error: 'Error al enviar recordatorio' }); }
 });
+
 app.post('/api/trips/:id/finalizar', async (req, res) => {
   try {
     const { user_phone, skip_notify } = req.body;
     const { data: trip } = await supabase.from('trips').select('*, trip_members(*), trip_expenses(*)').eq('id', req.params.id).single();
     if (!trip) return res.status(404).json({ error: 'Viaje no encontrado' });
-
-    // Si skip_notify, solo marcar como finalizado
     if (skip_notify) {
       await supabase.from('trips').update({ status: 'finished' }).eq('id', req.params.id);
       return res.json({ ok: true, sent: 0, total: 0 });
     }
-
     const members = trip.trip_members || [];
     const expenses = trip.trip_expenses || [];
     const total = expenses.reduce((s, e) => s + Number(e.amount), 0);
@@ -409,8 +368,6 @@ app.post('/api/trips/:id/finalizar', async (req, res) => {
       const share = Number(exp.amount) / split.length;
       split.forEach(n => { balances[n] = (balances[n] || 0) - share; });
     });
-
-    // Calcular deudas
     const debts = [];
     const dc = Object.entries(balances).filter(([,v]) => v < 0).sort((a,b) => a[1]-b[1]).map(([n,v]) => [n,v]);
     const cc = Object.entries(balances).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]).map(([n,v]) => [n,v]);
@@ -422,107 +379,58 @@ app.post('/api/trips/:id/finalizar', async (req, res) => {
       if (Math.abs(dc[i][1]) < 1) i++;
       if (Math.abs(cc[j][1]) < 1) j++;
     }
-
     const fecha = new Date().toLocaleDateString('es-CO', { day:'2-digit', month:'long', year:'numeric' });
-    const phonesSent = [];    // enviado directo
-    const phonesNoReg = [];   // sin cuenta MiCaja — se le dice al organizador
-
+    const phonesSent = [];
+    const phonesNoReg = [];
     for (const member of members) {
       if (!member.phone) continue;
-
-      // Normalizar teléfono
       const rawPhone = member.phone.replace(/[\s\-\+\(\)]/g,'').replace(/^0/,'');
       const finalPhone = rawPhone.startsWith('57') ? rawPhone : '57' + rawPhone;
-
-      // Verificar si está registrado en MiCaja (ya escribió al bot antes)
       const { data: registrado } = await supabase.from('users').select('id,name').eq('phone', finalPhone).single();
-
       const myBalance = Math.round(balances[member.name] || 0);
       const myDebts = debts.filter(d => d.from === member.name);
       const myCredits = debts.filter(d => d.to === member.name);
-
-      let msg = `✈️ *Resumen del viaje: ${trip.name}*\n📅 ${fecha}\n━━━━━━━━━━━━━\n`;
-      msg += `Hola *${member.name}*!\n\n`;
-      msg += `💰 Gasto total del grupo: *$${total.toLocaleString()}*\n`;
-      msg += `📊 Tu balance: *${myBalance>=0?'+':''}$${myBalance.toLocaleString()}*\n\n`;
+      let msg = `✈️ *Resumen del viaje: ${trip.name}*\n📅 ${fecha}\n━━━━━━━━━━━━━\nHola *${member.name}*!\n\n`;
+      msg += `💰 Gasto total: *$${total.toLocaleString()}*\n📊 Tu balance: *${myBalance>=0?'+':''}$${myBalance.toLocaleString()}*\n\n`;
       if (myDebts.length) { msg += `💸 *Debes pagarle a:*\n`; myDebts.forEach(d => { msg += `  • ${d.to}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
       if (myCredits.length) { msg += `💵 *Te deben pagarte:*\n`; myCredits.forEach(d => { msg += `  • ${d.from}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
-      if (!myDebts.length && !myCredits.length) msg += `✅ ¡Estás al día! No debes nada.\n\n`;
+      if (!myDebts.length && !myCredits.length) msg += `✅ ¡Estás al día!\n\n`;
       msg += `_Enviado desde MiCaja · milkomercios.in/MiCaja_`;
-
       if (registrado) {
-        // Está registrado en MiCaja — puede recibir mensajes directos del bot
         await sendWhatsApp(finalPhone, msg);
         phonesSent.push(member.name);
       } else {
-        // No registrado — intentar con template si está configurado en Railway
         const templateName = process.env.WA_TEMPLATE_RESUMEN;
         if (templateName) {
-          const myDebtsText = myDebts.length
-            ? myDebts.map(d => `Debes a ${d.to}: $${d.amount.toLocaleString()}`).join(', ')
-            : myCredits.length
-            ? myCredits.map(d => `${d.from} te debe: $${d.amount.toLocaleString()}`).join(', ')
-            : 'Estas al dia ✅';
-          await sendWhatsAppTemplate(finalPhone, templateName, [
-            member.name,
-            trip.name,
-            '$' + total.toLocaleString(),
-            (myBalance >= 0 ? '+' : '') + '$' + myBalance.toLocaleString(),
-            myDebtsText
-          ]);
+          const myDebtsText = myDebts.length ? myDebts.map(d=>`Debes a ${d.to}: $${d.amount.toLocaleString()}`).join(', ') : myCredits.length ? myCredits.map(d=>`${d.from} te debe: $${d.amount.toLocaleString()}`).join(', ') : 'Estás al día ✅';
+          await sendWhatsAppTemplate(finalPhone, templateName, [member.name, trip.name, '$'+total.toLocaleString(), (myBalance>=0?'+':'')+'$'+myBalance.toLocaleString(), myDebtsText]);
           phonesSent.push(member.name);
         } else {
-          // Sin template configurado — avisar al organizador para reenvío manual
           phonesNoReg.push({ name: member.name, phone: finalPhone, msg });
         }
       }
     }
-
-    // Notificar al organizador
     if (user_phone) {
       let orgMsg = `🏁 *Viaje "${trip.name}" finalizado*\n💰 Total: *$${total.toLocaleString()}*\n\n`;
-
-      if (phonesSent.length) {
-        orgMsg += `✅ Resumen enviado directamente a:\n${phonesSent.map(n=>`  • ${n}`).join('\n')}\n\n`;
-      }
-
-      if (phonesNoReg.length) {
-        orgMsg += `⚠️ *Los siguientes no tienen cuenta en MiCaja* — reenvíales este resumen manualmente:\n\n`;
-        phonesNoReg.forEach(p => {
-          orgMsg += `👤 *${p.name}* (${p.phone}):\n${p.msg}\n\n`;
-        });
-      }
-
-      if (!phonesSent.length && !phonesNoReg.length) {
-        orgMsg += `(Sin participantes con número registrado)`;
-      }
-
+      if (phonesSent.length) orgMsg += `✅ Enviado a:\n${phonesSent.map(n=>`  • ${n}`).join('\n')}\n\n`;
+      if (phonesNoReg.length) { orgMsg += `⚠️ Sin cuenta MiCaja — reenvía manualmente:\n\n`; phonesNoReg.forEach(p => { orgMsg += `👤 *${p.name}* (${p.phone}):\n${p.msg}\n\n`; }); }
+      if (!phonesSent.length && !phonesNoReg.length) orgMsg += `(Sin participantes con número registrado)`;
       await sendWhatsApp(user_phone, orgMsg);
     }
-
     await supabase.from('trips').update({ status: 'finished' }).eq('id', req.params.id);
     res.json({ ok: true, sent: phonesSent.length, noReg: phonesNoReg.length, total });
-  } catch (err) {
-    console.error('Finalizar error:', err);
-    res.status(500).json({ error: 'Error al finalizar viaje' });
-  }
+  } catch (err) { console.error('Finalizar error:', err); res.status(500).json({ error: 'Error al finalizar viaje' }); }
 });
 
 app.post('/api/trips/:tripId/expenses', async (req, res) => {
   try {
     const { description, amount, category, payer, split_between, notes, expense_date } = req.body;
-    const { data, error } = await supabase.from('trip_expenses').insert({
-      trip_id: req.params.tripId, description, amount,
-      category: category || 'General', payer, split_between,
-      notes: notes || null,
-      expense_date: expense_date || new Date().toISOString().split('T')[0]
-    }).select().single();
+    const { data, error } = await supabase.from('trip_expenses').insert({ trip_id: req.params.tripId, description, amount, category: category || 'General', payer, split_between, notes: notes || null, expense_date: expense_date || new Date().toISOString().split('T')[0] }).select().single();
     if (error) throw error;
     res.json({ ok: true, expense: data });
   } catch (err) { res.status(500).json({ error: 'Error al agregar gasto' }); }
 });
 
-// Editar gasto
 app.put('/api/trips/:tripId/expenses/:expId', async (req, res) => {
   try {
     const { description, amount, category, payer, split_between, notes, expense_date } = req.body;
@@ -547,7 +455,6 @@ app.delete('/api/trips/:tripId/expenses/:expId', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al eliminar gasto' }); }
 });
 
-// Desmarcar pago/abono de deuda
 app.delete('/api/trips/:id/debt-payments', async (req, res) => {
   try {
     const { debt_key } = req.body;
@@ -582,7 +489,7 @@ app.get('/api/trips/:tripId/balance', async (req, res) => {
 });
 
 // ══════════════════════════════════════
-// MÉTODOS DE PAGO DEL USUARIO
+// MÉTODOS DE PAGO
 // ══════════════════════════════════════
 app.get('/api/payment-methods/:userId', async (req, res) => {
   try {
@@ -608,7 +515,6 @@ app.delete('/api/payment-methods/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
 
-// Generar o recuperar token público de pagos del usuario
 app.post('/api/payment-methods/:userId/token', async (req, res) => {
   try {
     const { data: user } = await supabase.from('users').select('id, name, pay_token').eq('id', req.params.userId).single();
@@ -620,7 +526,6 @@ app.post('/api/payment-methods/:userId/token', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al generar token' }); }
 });
 
-// Resetear token — el anterior deja de funcionar
 app.post('/api/payment-methods/:userId/token/reset', async (req, res) => {
   try {
     const token = crypto.randomBytes(12).toString('hex');
@@ -629,7 +534,6 @@ app.post('/api/payment-methods/:userId/token/reset', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al regenerar token' }); }
 });
 
-// Endpoint público — ver métodos de pago por token (sin autenticación)
 app.get('/api/pagos-publico/:token', async (req, res) => {
   try {
     const { data: user } = await supabase.from('users').select('id, name, phone').eq('pay_token', req.params.token).single();
@@ -638,12 +542,17 @@ app.get('/api/pagos-publico/:token', async (req, res) => {
     res.json({ ok: true, name: user.name, methods: methods || [] });
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
+
+// ══════════════════════════════════════
+// AMIGOS VIAJEROS
+// ══════════════════════════════════════
 app.get('/api/travel-friends/:userId', async (req, res) => {
   try {
     const { data } = await supabase.from('travel_friends').select('*').eq('user_id', req.params.userId).order('name');
     res.json({ ok: true, friends: data || [] });
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
+
 app.post('/api/travel-friends', async (req, res) => {
   try {
     const { user_id, name, phone } = req.body;
@@ -653,6 +562,7 @@ app.post('/api/travel-friends', async (req, res) => {
     res.json({ ok: true, friend: data });
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
+
 app.delete('/api/travel-friends/:id', async (req, res) => {
   try {
     await supabase.from('travel_friends').delete().eq('id', req.params.id);
@@ -660,7 +570,6 @@ app.delete('/api/travel-friends/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
 
-// PRESUPUESTO DE VIAJE — envía estimado por WA
 app.post('/api/trips/:id/presupuesto', async (req, res) => {
   try {
     const { budget_per_person, categories, members, trip_name } = req.body;
@@ -671,14 +580,7 @@ app.post('/api/trips/:id/presupuesto', async (req, res) => {
       const phone = mp.phone.replace(/[\s\-\+\(\)]/g,'').replace(/^0/,'');
       const finalPhone = phone.startsWith('57') ? phone : '57'+phone;
       const catLines = (categories||[]).map(c => `  • ${c.name}: $${Number(c.amount).toLocaleString()} COP`).join('\n');
-      const msg =
-        `📋 *Presupuesto estimado — ${trip_name}*\n\n` +
-        `Hola *${mp.name}*! 👋\n\n` +
-        `Se está planeando un viaje y queremos que tengas una idea de los costos:\n\n` +
-        `💰 *Por persona: $${Number(budget_per_person).toLocaleString()} COP*\n\n` +
-        (catLines ? `📊 *Desglose estimado:*\n${catLines}\n\n` : '') +
-        `💸 Total grupo (${members.length} personas): *$${total.toLocaleString()} COP*\n\n` +
-        `_Presupuesto estimado — los gastos reales se registrarán en MiCaja._ ✈️`;
+      const msg = `📋 *Presupuesto estimado — ${trip_name}*\n\nHola *${mp.name}*! 👋\n\n💰 *Por persona: $${Number(budget_per_person).toLocaleString()} COP*\n\n${catLines ? `📊 *Desglose:*\n${catLines}\n\n` : ''}💸 Total grupo (${members.length} personas): *$${total.toLocaleString()} COP*\n\n_Presupuesto estimado — los gastos reales se registrarán en MiCaja._ ✈️`;
       await sendWhatsApp(finalPhone, msg);
       sent.push(mp.name);
     }
@@ -704,16 +606,22 @@ app.post('/webhook', async (req, res) => {
     const msg = messages[0];
     const from = msg.from;
 
-    // Manejar audios, imágenes, stickers, etc.
-    if (msg.type === 'audio' || msg.type === 'voice') {
-      await sendWhatsApp(from, `🎤 No proceso mensajes de voz todavía.\n\nEscríbeme el gasto o ingreso así:\n💸 _"pagué luz 80mil"_\n💵 _"me ingresaron 200mil"_`);
-      return res.sendStatus(200);
-    }
-    if (msg.type === 'image' || msg.type === 'video' || msg.type === 'document' || msg.type === 'sticker') {
-      await sendWhatsApp(from, `📎 Solo proceso mensajes de texto por ahora.\n\nEscríbeme lo que quieres registrar 😊`);
+    // Rate limit WhatsApp — evita loops y spam
+    const waLimit = rateLimitWA(from);
+    if (waLimit.blocked) {
+      console.warn(`⚠️ WA rate limit (${waLimit.reason}): ${from}`);
+      if (waLimit.reason === 'dia') await sendWhatsApp(from, `⚠️ Has alcanzado el límite de mensajes por hoy. Intenta mañana o usa la web: milkomercios.in/MiCaja`);
       return res.sendStatus(200);
     }
 
+    if (msg.type === 'audio' || msg.type === 'voice') {
+      await sendWhatsApp(from, `🎤 No proceso mensajes de voz todavía.\n\nEscríbeme así:\n💸 _"pagué luz 80mil"_\n💵 _"me ingresaron 200mil"_`);
+      return res.sendStatus(200);
+    }
+    if (msg.type === 'image' || msg.type === 'video' || msg.type === 'document' || msg.type === 'sticker') {
+      await sendWhatsApp(from, `📎 Solo proceso mensajes de texto por ahora 😊`);
+      return res.sendStatus(200);
+    }
     const text = msg.text?.body?.trim();
     if (!text) return res.sendStatus(200);
     console.log(`📱 WhatsApp de ${from}: ${text}`);
@@ -728,8 +636,6 @@ app.post('/webhook', async (req, res) => {
 async function processWhatsAppMessage(phone, text) {
   let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
   const lower = text.toLowerCase().trim();
-
-  // Sesión para flujos multi-paso
   let { data: session } = await supabase.from('wa_sessions').select('*').eq('phone', phone).single();
   const ctx = session?.context ? JSON.parse(session.context) : {};
 
@@ -741,20 +647,11 @@ async function processWhatsAppMessage(phone, text) {
   }
   async function clearCtx() { if (session) await supabase.from('wa_sessions').update({ context: '{}' }).eq('id', session.id); }
 
-  // ═══ REGISTRO PASO 1: elegir plan ═══
   if (!user && ['registrar','registro','registrarme','empezar','comenzar','crear cuenta','nueva cuenta','quiero registrarme'].includes(lower)) {
     await setCtx({ step: 'register_plan' });
-    await sendWhatsApp(phone,
-      `🎉 ¡Bienvenido a *MiCaja*!\n\n¿Para qué quieres usarla?\n\n` +
-      `*1.* 👤 Personal — mis gastos diarios\n` +
-      `*2.* 💑 Pareja — finanzas juntos\n` +
-      `*3.* ✈️ Viajes — dividir cuentas\n` +
-      `*4.* 🏪 Negocio — mi emprendimiento\n\nResponde con el número`
-    );
+    await sendWhatsApp(phone, `🎉 ¡Bienvenido a *MiCaja*!\n\n¿Para qué quieres usarla?\n\n*1.* 👤 Personal\n*2.* 💑 Pareja\n*3.* ✈️ Viajes\n*4.* 🏪 Negocio\n\nResponde con el número`);
     return;
   }
-
-  // ═══ REGISTRO PASO 2: recibir plan ═══
   if (!user && ctx.step === 'register_plan') {
     const planMap = {'1':'personal','2':'parejas','3':'viajes','4':'comerciantes','personal':'personal','pareja':'parejas','parejas':'parejas','viaje':'viajes','viajes':'viajes','negocio':'comerciantes','comercio':'comerciantes'};
     const plan = planMap[lower];
@@ -763,8 +660,6 @@ async function processWhatsAppMessage(phone, text) {
     await sendWhatsApp(phone, `¿Cómo te llamas? ✍️`);
     return;
   }
-
-  // ═══ REGISTRO PASO 3: nombre y crear cuenta ═══
   if (!user && ctx.step === 'register_name') {
     const name = text.trim();
     const plan = ctx.plan || 'personal';
@@ -773,350 +668,175 @@ async function processWhatsAppMessage(phone, text) {
     if (!error && newUser) {
       await clearCtx();
       const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-      await sendWhatsApp(phone,
-        `✅ *¡Listo ${name}!*\n\n📋 Plan: ${planNames[plan]}\n🔐 Tu PIN: *${pin}* (guárdalo para la web)\n\n` +
-        `Ya puedes escribirme:\n💸 _"pagué arriendo 800mil"_\n💵 _"me pagaron 2 millones"_\n📊 _"cómo voy?"_\n\n¡Empecemos! 🚀`
-      );
+      await sendWhatsApp(phone, `✅ *¡Listo ${name}!*\n\n📋 Plan: ${planNames[plan]}\n🔐 Tu PIN: *${pin}* (guárdalo para la web)\n\n💸 _"pagué arriendo 800mil"_\n💵 _"me pagaron 2 millones"_\n📊 _"cómo voy?"_\n\n¡Empecemos! 🚀`);
     } else { await clearCtx(); await sendWhatsApp(phone, `Algo falló. Escribe *registrar* para intentar de nuevo.`); }
     return;
   }
-
-  // Sin cuenta
   if (!user) {
-    await sendWhatsApp(phone,
-      `👋 ¡Hola! Soy *MiCajaBot* 🤖\n\n` +
-      `Para usar MiCaja necesitas una cuenta.\n\n` +
-      `Escribe *registrarme* y te ayudo a crearla en 30 segundos 🚀\n\n` +
-      `Ya con cuenta puedes:\n` +
-      `💸 Registrar gastos e ingresos\n` +
-      `✈️ Gestionar viajes con amigos\n` +
-      `📊 Ver tus finanzas al instante`
-    );
+    await sendWhatsApp(phone, `👋 ¡Hola! Soy *MiCajaBot* 🤖\n\nEscribe *registrarme* y te ayudo a crear tu cuenta en 30 segundos 🚀`);
     return;
   }
 
-  // ═══ PIN — detección flexible ═══
   const pinConsulta = /^(mi\s+)?pin$|^(cuál|cual)\s+es\s+mi\s+pin|^(olvidé|olvide|recuperar|recordar|ver)\s+(mi\s+)?pin|^pin\?$/i;
   if (pinConsulta.test(lower)) {
-    await sendWhatsApp(phone, `🔐 Tu PIN es: *${user.pin}*\n\nPara cambiarlo escribe:\n_"cambiar pin 1234"_ (pon tus 4 dígitos)`);
+    await sendWhatsApp(phone, `🔐 Tu PIN es: *${user.pin}*\n\nPara cambiarlo: _"cambiar pin 1234"_`);
     return;
   }
-  // Cambiar pin — acepta "cambiar pin 1234", "nuevo pin 1234", "pin 1234", "mi pin es 1234"
   const pinCambio = lower.match(/(?:cambiar\s+pin|nuevo\s+pin|pin\s+nuevo|mi\s+pin\s+es)\s*(\d{4})/i) || lower.match(/^pin\s+(\d{4})$/i);
   if (pinCambio) {
-    const newPin = pinCambio[1];
-    await supabase.from('users').update({ pin: newPin }).eq('id', user.id);
-    await sendWhatsApp(phone, `✅ PIN cambiado a *${newPin}* 🔒\n\nGuárdalo, lo necesitas para entrar a la web.`);
+    await supabase.from('users').update({ pin: pinCambio[1] }).eq('id', user.id);
+    await sendWhatsApp(phone, `✅ PIN cambiado a *${pinCambio[1]}* 🔒`);
     return;
   }
-
-  // ═══ MÓDULO ACTIVO ═══
-  if (['mi módulo','mi modulo','qué módulo','que modulo','módulo actual','modulo actual'].includes(lower)) {
+  if (['mi módulo','mi modulo','módulo actual','modulo actual'].includes(lower)) {
     const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-    await sendWhatsApp(phone, `📋 Tu módulo activo: *${planNames[user.plan]||user.plan}*\n\nPara cambiar: _"módulo personal"_, _"módulo pareja"_, _"módulo viajes"_, _"módulo negocio"_`);
+    await sendWhatsApp(phone, `📋 Módulo activo: *${planNames[user.plan]||user.plan}*\n\nCambiar: _"módulo personal/pareja/viajes/negocio"_`);
     return;
   }
-  const moduloMatch = lower.match(/^módulo\s+(.+)|^modulo\s+(.+)/i);
+  const moduloMatch = lower.match(/^(?:módulo|modulo)\s+(.+)/i);
   if (moduloMatch) {
-    const req = (moduloMatch[1]||moduloMatch[2]).trim();
     const planMap = {'personal':'personal','pareja':'parejas','parejas':'parejas','viaje':'viajes','viajes':'viajes','negocio':'comerciantes','comercio':'comerciantes','comerciante':'comerciantes'};
-    const plan = planMap[req];
+    const plan = planMap[moduloMatch[1].trim()];
     if (plan) {
       await supabase.from('users').update({ plan }).eq('id', user.id);
       const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-      await sendWhatsApp(phone, `✅ Módulo cambiado a *${planNames[plan]}*\n\nAhora tus registros van a ese módulo 💪`);
-    } else {
-      await sendWhatsApp(phone, `Módulos: *personal*, *pareja*, *viajes*, *negocio*`);
-    }
+      await sendWhatsApp(phone, `✅ Módulo cambiado a *${planNames[plan]}* 💪`);
+    } else { await sendWhatsApp(phone, `Módulos: *personal*, *pareja*, *viajes*, *negocio*`); }
     return;
   }
-
-  // ═══ NOMBRE ═══
   if (lower.startsWith('mi nombre es ') || lower.startsWith('me llamo ')) {
     const name = text.replace(/^(mi nombre es |me llamo )/i, '').trim();
     if (name) { await supabase.from('users').update({ name }).eq('id', user.id); await sendWhatsApp(phone, `Mucho gusto *${name}* 😊`); }
     return;
   }
-
-  // ═══ PLAN ═══
-  if (lower === 'cambiar plan' || lower === 'mi plan') {
-    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-    await sendWhatsApp(phone, `Tu plan actual: *${planNames[user.plan]||user.plan}*\n\nPara cambiar escribe:\n_"plan personal"_\n_"plan pareja"_\n_"plan viajes"_\n_"plan negocio"_`);
-    return;
-  }
-  if (lower.startsWith('plan ')) {
-    const planMap = {'personal':'personal','pareja':'parejas','parejas':'parejas','viaje':'viajes','viajes':'viajes','negocio':'comerciantes','comercio':'comerciantes'};
-    const plan = planMap[lower.replace('plan ','').trim()];
-    if (plan) {
-      await supabase.from('users').update({ plan }).eq('id', user.id);
-      const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-      await sendWhatsApp(phone, `✅ Plan cambiado a *${planNames[plan]}* 💪`);
-    } else { await sendWhatsApp(phone, `Opciones: *personal*, *pareja*, *viajes*, *negocio*`); }
-    return;
-  }
-
-  // ═══ SALUDOS ═══
   if (['hola','hi','hey','buenas','buenos días','buenos dias','buenas tardes','buenas noches','qué más','que mas','inicio'].includes(lower)) {
     const hour = new Date(new Date().toLocaleString('en-US',{timeZone:'America/Bogota'})).getHours();
     const saludo = hour < 12 ? 'Buenos días' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
-    const module = user.plan || 'personal';
     const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-    const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', module);
+    const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', user.plan);
     const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
-    await sendWhatsApp(phone,
-      `${saludo} ${user.name||''}! 👋\n\n` +
-      `Módulo: *${planNames[module]}*\n` +
-      `${movs&&movs.length ? `Balance: *$${bal.toLocaleString()}*\n` : ''}` +
-      `\n¿Qué necesitas?\n💸 _"pagué luz 80mil"_\n💵 _"me ingresaron 200mil"_\n📊 _"cómo voy?"_\n📄 _"informe"_\n🔐 _"pin"_\n❓ _"ayuda"_`
-    );
+    await sendWhatsApp(phone, `${saludo} ${user.name||''}! 👋\n\nMódulo: *${planNames[user.plan]}*\n${movs&&movs.length ? `Balance: *$${bal.toLocaleString()}*\n` : ''}\n💸 _"pagué luz 80mil"_\n💵 _"me ingresaron 200mil"_\n📊 _"cómo voy?"_\n❓ _"ayuda"_`);
     return;
   }
-
-  // ═══ AYUDA ═══
-  if (['ayuda','help','?','comandos','opciones','qué puedo hacer','que puedo hacer','menu','menú'].includes(lower)) {
-    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-    await sendWhatsApp(phone,
-      `📋 *Comandos MiCaja:*\n\n` +
-      `💸 Gasto: _"pagué luz 80mil"_\n` +
-      `💵 Ingreso: _"me ingresaron 200mil"_\n` +
-      `📊 Resumen: _"cómo voy?"_\n` +
-      `📄 Informe: _"informe"_ o _"pdf"_\n` +
-      `🗑 Borrar: _"borrar"_\n` +
-      `🔐 Ver PIN: _"pin"_\n` +
-      `🔄 Cambiar PIN: _"cambiar pin 1234"_\n` +
-      `📋 Mi módulo: _"mi módulo"_\n` +
-      `🔀 Cambiar módulo: _"módulo negocio"_\n` +
-      `✍️ Nombre: _"me llamo Carlos"_\n\n` +
-      `Módulo activo: *${planNames[user.plan]||user.plan}*`
-    );
+  if (['ayuda','help','?','comandos','opciones','menu','menú'].includes(lower)) {
+    await sendWhatsApp(phone, `📋 *Comandos MiCaja:*\n\n💸 _"pagué luz 80mil"_\n💵 _"me ingresaron 200mil"_\n📊 _"cómo voy?"_\n📄 _"informe"_\n🗑 _"borrar"_\n🔐 _"pin"_\n🔄 _"cambiar pin 1234"_\n📋 _"mi módulo"_\n🔀 _"módulo negocio"_\n🤝 _"mis deudas"_\n🌐 _"web"_`);
     return;
   }
-
-  // ═══ INFORME / PDF ═══
-  if (['informe','pdf','reporte','informe pdf','reporte pdf','mi informe','ver informe','informe del mes'].includes(lower)) {
+  if (['informe','pdf','reporte','informe del mes'].includes(lower)) {
     const module = user.plan || 'personal';
     const planNames = {personal:'Finanzas Personales',parejas:'Finanzas en Pareja',viajes:'Viajes',comerciantes:'Mi Negocio'};
     const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', module).order('date',{ascending:false});
     const inc = (movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
     const exp = (movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
-    const bal = inc-exp;
     const byCat = {};
     (movs||[]).filter(m=>m.type==='expense').forEach(m=>{byCat[m.category]=(byCat[m.category]||0)+Number(m.amount);});
     const topCats = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,v])=>`  • ${c}: $${v.toLocaleString()}`).join('\n');
     const last5 = (movs||[]).slice(0,5).map(m=>`  ${m.type==='income'?'💵':'💸'} ${m.description}: $${Number(m.amount).toLocaleString()}`).join('\n');
     const fecha = new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
-    await sendWhatsApp(phone,
-      `📄 *Informe — ${planNames[module]}*\n` +
-      `📅 ${fecha} · ${user.name||'Usuario'}\n` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `💵 Ingresos: *$${inc.toLocaleString()}*\n` +
-      `💸 Gastos:   *$${exp.toLocaleString()}*\n` +
-      `${bal>=0?'✅':'⚠️'} Balance:  *$${bal.toLocaleString()}*\n` +
-      `📋 Total: ${(movs||[]).length} movimientos\n` +
-      `${inc>0?`🎯 Ahorro: ${Math.round((bal/inc)*100)}%\n`:'' }` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `${topCats?`📂 *Top gastos:*\n${topCats}\n━━━━━━━━━━━━━━━━\n`:''}` +
-      `🕐 *Últimos movimientos:*\n${last5||'  Sin movimientos'}\n` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `🌐 Ver completo:\nmilkomercios.in/MiCaja/${module}.html`
-    );
+    await sendWhatsApp(phone, `📄 *Informe — ${planNames[module]}*\n📅 ${fecha}\n━━━━━━━━━━━━━━━━\n💵 Ingresos: *$${inc.toLocaleString()}*\n💸 Gastos: *$${exp.toLocaleString()}*\n${inc-exp>=0?'✅':'⚠️'} Balance: *$${(inc-exp).toLocaleString()}*\n📋 ${(movs||[]).length} movimientos\n━━━━━━━━━━━━━━━━\n${topCats?`📂 *Top gastos:*\n${topCats}\n━━━━━━━━━━━━━━━━\n`:''}🕐 *Últimos:*\n${last5||'  Sin movimientos'}\n━━━━━━━━━━━━━━━━\n🌐 milkomercios.in/MiCaja/${module}.html`);
     return;
   }
-
-  // ═══ RESUMEN COMPLETO ═══
-  if (['resumen','cuánto llevo','cuanto llevo','balance','cómo voy','como voy','cómo voy?','como voy?','estado','saldo'].includes(lower)) {
+  if (['resumen','cuánto llevo','cuanto llevo','balance','cómo voy','como voy','estado','saldo'].includes(lower)) {
     const module = user.plan || 'personal';
     const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', module);
     const inc = (movs||[]).filter(m => m.type==='income').reduce((s,m) => s+Number(m.amount), 0);
     const exp = (movs||[]).filter(m => m.type==='expense').reduce((s,m) => s+Number(m.amount), 0);
     const bal = inc - exp;
-    const count = (movs||[]).length;
-    if (count === 0) { await sendWhatsApp(phone, `Aún no tienes movimientos 📭\n\nEscribe _"pagué luz 80mil"_ para empezar.`); return; }
-
+    if (!(movs||[]).length) { await sendWhatsApp(phone, `Aún no tienes movimientos 📭\n\nEscribe _"pagué luz 80mil"_ para empezar.`); return; }
     const byCat = {};
     (movs||[]).filter(m => m.type==='expense').forEach(m => { byCat[m.category] = (byCat[m.category]||0) + Number(m.amount); });
-    const topCats = Object.entries(byCat).sort((a,b) => b[1]-a[1]).slice(0,3);
-    const catText = topCats.map(([cat,amt]) => `  • ${cat}: $${amt.toLocaleString()}`).join('\n');
-
-    const last3 = (movs||[]).sort((a,b) => new Date(b.created_at)-new Date(a.created_at)).slice(0,3);
-    const lastText = last3.map(m => `  ${m.type==='income'?'💵':'💸'} ${m.description}: $${Number(m.amount).toLocaleString()}`).join('\n');
-
-    const tip = bal >= 0 ? (inc > 0 ? `Ahorrando el *${Math.round((bal/inc)*100)}%* de tus ingresos 👏` : '') : `⚠️ Gastos superan ingresos. Revisa ${topCats[0]?topCats[0][0]:'tus gastos'}.`;
-
-    await sendWhatsApp(phone,
-      `📊 *Resumen de ${user.name||'tu cuenta'}*\n\n` +
-      `💵 Ingresos: *$${inc.toLocaleString()}*\n💸 Gastos: *$${exp.toLocaleString()}*\n${bal>=0?'✅':'⚠️'} Balance: *$${bal.toLocaleString()}*\n📋 ${count} movimientos\n\n` +
-      `${topCats.length ? `📂 *Top gastos:*\n${catText}\n\n` : ''}🕐 *Recientes:*\n${lastText}\n\n${tip}`
-    );
+    const topCats = Object.entries(byCat).sort((a,b) => b[1]-a[1]).slice(0,3).map(([cat,amt]) => `  • ${cat}: $${amt.toLocaleString()}`).join('\n');
+    const last3 = (movs||[]).sort((a,b) => new Date(b.created_at)-new Date(a.created_at)).slice(0,3).map(m => `  ${m.type==='income'?'💵':'💸'} ${m.description}: $${Number(m.amount).toLocaleString()}`).join('\n');
+    await sendWhatsApp(phone, `📊 *Resumen de ${user.name||'tu cuenta'}*\n\n💵 Ingresos: *$${inc.toLocaleString()}*\n💸 Gastos: *$${exp.toLocaleString()}*\n${bal>=0?'✅':'⚠️'} Balance: *$${bal.toLocaleString()}*\n📋 ${(movs||[]).length} movimientos\n\n${topCats?`📂 *Top gastos:*\n${topCats}\n\n`:''}🕐 *Recientes:*\n${last3}\n\n${inc>0?`Ahorrando el *${Math.round((bal/inc)*100)}%* 👏`:''}`);
     return;
   }
-
-  // ═══ DEUDAS ═══
-  if (['mis deudas','deudas','qué debo','que debo','cuánto debo','cuanto debo','me deben','qué me deben','que me deben'].includes(lower)) {
+  if (['mis deudas','deudas','qué debo','que debo','cuánto debo','cuanto debo','me deben'].includes(lower)) {
     try {
       const { data: debts } = await supabase.from('debts').select('*').eq('user_id', user.id).eq('status', 'pending').or('status.eq.partial');
-      const debo = (debts || []).filter(d => d.type === 'debo');
-      const meDeben = (debts || []).filter(d => d.type === 'me_deben');
-      const totalDebo = debo.reduce((s,d) => s + Number(d.amount) - Number(d.paid || 0), 0);
-      const totalMeDeben = meDeben.reduce((s,d) => s + Number(d.amount) - Number(d.paid || 0), 0);
-
-      let msg = `🤝 *Mis Deudas*\n\n`;
-      msg += `💸 Yo debo: *$${totalDebo.toLocaleString()}*\n`;
-      msg += `💵 Me deben: *$${totalMeDeben.toLocaleString()}*\n`;
-      msg += `⚖️ Balance: *${totalMeDeben - totalDebo >= 0 ? '+' : ''}$${(totalMeDeben - totalDebo).toLocaleString()}*\n\n`;
-
-      if (debo.length) {
-        msg += `📋 *Lo que debo:*\n`;
-        debo.slice(0,5).forEach(d => { msg += `  • ${d.person_name}: $${(Number(d.amount)-Number(d.paid||0)).toLocaleString()}\n`; });
-      }
-      if (meDeben.length) {
-        msg += `\n📋 *Lo que me deben:*\n`;
-        meDeben.slice(0,5).forEach(d => { msg += `  • ${d.person_name}: $${(Number(d.amount)-Number(d.paid||0)).toLocaleString()}\n`; });
-      }
-      msg += `\n🌐 Ver completo: milkomercios.in/MiCaja/deudas.html`;
+      const debo = (debts||[]).filter(d => d.type==='debo');
+      const meDeben = (debts||[]).filter(d => d.type==='me_deben');
+      const totalDebo = debo.reduce((s,d) => s+Number(d.amount)-Number(d.paid||0), 0);
+      const totalMeDeben = meDeben.reduce((s,d) => s+Number(d.amount)-Number(d.paid||0), 0);
+      let msg = `🤝 *Mis Deudas*\n\n💸 Yo debo: *$${totalDebo.toLocaleString()}*\n💵 Me deben: *$${totalMeDeben.toLocaleString()}*\n⚖️ Balance: *${totalMeDeben-totalDebo>=0?'+':''}$${(totalMeDeben-totalDebo).toLocaleString()}*\n\n`;
+      if (debo.length) { msg += `📋 *Lo que debo:*\n`; debo.slice(0,5).forEach(d => { msg += `  • ${d.person_name}: $${(Number(d.amount)-Number(d.paid||0)).toLocaleString()}\n`; }); }
+      if (meDeben.length) { msg += `\n📋 *Lo que me deben:*\n`; meDeben.slice(0,5).forEach(d => { msg += `  • ${d.person_name}: $${(Number(d.amount)-Number(d.paid||0)).toLocaleString()}\n`; }); }
+      msg += `\n🌐 milkomercios.in/MiCaja/deudas.html`;
       await sendWhatsApp(phone, msg);
-    } catch(e) {
-      await sendWhatsApp(phone, `🤝 Para ver tus deudas entra a:\n🌐 milkomercios.in/MiCaja/deudas.html`);
-    }
+    } catch(e) { await sendWhatsApp(phone, `🌐 Ver deudas: milkomercios.in/MiCaja/deudas.html`); }
     return;
   }
-
-  // Registrar deuda por WhatsApp: "le debo 50mil a Juan", "Carlos me debe 80mil"
   const deboMatch = lower.match(/(?:le debo|debo)\s+(\d+[\d.,]*\s*(?:mil|k|m)?)\s+(?:a|le a)?\s*(.+)/i);
   const meDebenMatch = lower.match(/(.+)\s+me debe\s+(\d+[\d.,]*\s*(?:mil|k|m)?)/i);
-
   if (deboMatch) {
     const amountRaw = deboMatch[1]; const persona = deboMatch[2].trim();
     const amount = parseFloat(amountRaw.replace(/mil|k/i,'').replace(/[.,]/g,'')) * (amountRaw.match(/mil|k/i) ? 1000 : 1);
     await supabase.from('debts').insert({ user_id: user.id, type: 'debo', person_name: persona, amount, status: 'pending', paid: 0 });
-    await sendWhatsApp(phone, `💸 Deuda registrada:\nLe debes *$${amount.toLocaleString()}* a *${persona}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
+    await sendWhatsApp(phone, `💸 Le debes *$${amount.toLocaleString()}* a *${persona}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
     return;
   }
   if (meDebenMatch) {
     const persona = meDebenMatch[1].trim(); const amountRaw = meDebenMatch[2];
     const amount = parseFloat(amountRaw.replace(/mil|k/i,'').replace(/[.,]/g,'')) * (amountRaw.match(/mil|k/i) ? 1000 : 1);
     await supabase.from('debts').insert({ user_id: user.id, type: 'me_deben', person_name: persona, amount, status: 'pending', paid: 0 });
-    await sendWhatsApp(phone, `💵 Deuda registrada:\n*${persona}* te debe *$${amount.toLocaleString()}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
+    await sendWhatsApp(phone, `💵 *${persona}* te debe *$${amount.toLocaleString()}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
     return;
   }
-  const webCmds = ['web','link','página','pagina','entrar web','abrir web','ver web','ir a la web','iniciar sesion web','iniciar sesión web','ir al portal','portal','dashboard','ir al dashboard','abrir dashboard','usar web','abrir app','ir a la app','la app','la web','entrar','entrar al sistema','sistema','plataforma','ver mis datos','ver datos','datos web','mis datos web','ingresar','ingresar a la web','acceder','acceso web','login','entrar a micaja','abrir micaja','micaja web','ver micaja','mi cuenta web','mi cuenta','ver cuenta'];
+  const webCmds = ['web','link','portal','dashboard','login','entrar','ingresar','acceder','mi cuenta'];
   if (webCmds.includes(lower) || webCmds.some(c => lower.includes(c))) {
-    await sendWhatsApp(phone,
-      `🌐 *Accede a MiCaja desde la web:*\n\n` +
-      `👉 milkomercios.in/MiCaja/login.html\n\n` +
-      `📱 Tu número: *${phone}*\n` +
-      `🔐 Tu PIN: *${user.pin}*\n\n` +
-      `_Ingresa con tu número y PIN para ver tus datos, gráficos e informes completos._`
-    );
+    await sendWhatsApp(phone, `🌐 *Accede a MiCaja:*\n\n👉 milkomercios.in/MiCaja/login.html\n\n📱 Tu número: *${phone}*\n🔐 Tu PIN: *${user.pin}*`);
     return;
   }
-
-  // ═══ PAGAR / SUSCRIPCIÓN ═══
-  if (['pagar','suscripción','suscripcion','pago','mi suscripción','activar','renovar','pagar micaja'].includes(lower)) {
+  if (['pagar','suscripción','suscripcion','renovar','activar'].includes(lower)) {
     try {
-      // Generar link directo de pago con token
       const linkRes = await axios.get(`https://micaja-backend-production.up.railway.app/api/payments/link/${phone}`);
-      if (linkRes.data.ok) {
-        await sendWhatsApp(phone,
-          `💳 *Suscripción MiCaja*\n\n` +
-          `📋 Acceso completo a todos los módulos\n` +
-          `💰 *$20.000 COP / mes*\n` +
-          `💳 Tarjeta, PSE, Nequi\n\n` +
-          `👇 Haz clic para pagar directo (sin login):\n${linkRes.data.url}\n\n` +
-          `⏱ _El link expira en 30 minutos_`
-        );
-      }
-    } catch(e) {
-      await sendWhatsApp(phone,
-        `💳 Para pagar tu suscripción entra a:\n🌐 milkomercios.in/MiCaja/dashboard.html`
-      );
-    }
+      if (linkRes.data.ok) await sendWhatsApp(phone, `💳 *Suscripción MiCaja — $20.000 COP/mes*\n\n👇 Paga aquí:\n${linkRes.data.url}\n\n⏱ _El link expira en 30 minutos_`);
+    } catch(e) { await sendWhatsApp(phone, `💳 Pagar: milkomercios.in/MiCaja/dashboard.html`); }
     return;
   }
-  if (['borrar último','borrar ultimo','borrar','eliminar último','eliminar ultimo','deshacer'].includes(lower)) {
-    const module = user.plan || 'personal';
-    const { data: last } = await supabase.from('movements').select('id, description, amount, type, category').eq('user_id', user.id).eq('module', module).order('created_at',{ascending:false}).limit(1).single();
+  if (['borrar último','borrar ultimo','borrar','deshacer'].includes(lower)) {
+    const { data: last } = await supabase.from('movements').select('id,description,amount,type,category').eq('user_id', user.id).eq('module', user.plan).order('created_at',{ascending:false}).limit(1).single();
     if (last) {
       await supabase.from('movements').delete().eq('id', last.id);
-      await sendWhatsApp(phone, `🗑 Borré el último movimiento:\n${last.type==='income'?'💵':'💸'} *${last.description}* — $${Number(last.amount).toLocaleString()}\n📂 ${last.category}`);
-    } else {
-      await sendWhatsApp(phone, `No tienes movimientos para borrar 📭`);
-    }
+      await sendWhatsApp(phone, `🗑 Borré: ${last.type==='income'?'💵':'💸'} *${last.description}* — $${Number(last.amount).toLocaleString()}`);
+    } else { await sendWhatsApp(phone, `No tienes movimientos para borrar 📭`); }
     return;
   }
-
-  // ═══ VER ÚLTIMOS MOVIMIENTOS ═══
-  if (['últimos','ultimos','últimos movimientos','ver últimos','mis movimientos','ver movimientos'].includes(lower)) {
-    const module = user.plan || 'personal';
-    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', module).order('created_at',{ascending:false}).limit(5);
+  if (['últimos','ultimos','mis movimientos','ver movimientos'].includes(lower)) {
+    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', user.plan).order('created_at',{ascending:false}).limit(5);
     if (!movs || !movs.length) { await sendWhatsApp(phone, `No tienes movimientos aún 📭`); return; }
     const lista = movs.map((m,i) => `${i+1}. ${m.type==='income'?'💵':'💸'} ${m.description} — $${Number(m.amount).toLocaleString()}\n   📂 ${m.category} · ${m.date}`).join('\n\n');
-    await sendWhatsApp(phone, `🕐 *Últimos 5 movimientos:*\n\n${lista}\n\nPara borrar el último escribe _"borrar"_`);
+    await sendWhatsApp(phone, `🕐 *Últimos 5 movimientos:*\n\n${lista}`);
     return;
   }
-
-  // ═══ CONFIRMAR CATEGORÍA (flujo de 2 pasos) ═══
   if (ctx.step === 'confirm_cat') {
     const cats = {'1':'Alimentación','2':'Arriendo','3':'Servicios','4':'Transporte','5':'Salud','6':'Entretenimiento','7':'Educación','8':'Proveedores','9':'Nómina','10':'Ventas','11':'Salario','0':'Otros'};
     const finalCat = cats[lower] || (Object.values(cats).map(c=>c.toLowerCase()).includes(lower) ? lower.charAt(0).toUpperCase()+lower.slice(1) : null);
-
-    if (lower === 'cancelar' || lower === 'no') {
-      await clearCtx();
-      await sendWhatsApp(phone, `❌ Cancelado. No se guardó nada.`);
-      return;
-    }
-
-    const useCat = finalCat || (lower === 'si' || lower === 'sí' || lower === 'ok' || lower === 'listo' ? ctx.category : null);
+    if (lower === 'cancelar' || lower === 'no') { await clearCtx(); await sendWhatsApp(phone, `❌ Cancelado.`); return; }
+    const useCat = finalCat || (['si','sí','ok','listo'].includes(lower) ? ctx.category : null);
     if (useCat) {
-      const module = user.plan || 'personal';
-      const planNames = {personal:'👤',parejas:'💑',viajes:'✈️',comerciantes:'🏪'};
-      const { error } = await supabase.from('movements').insert({user_id: user.id, type: ctx.type, amount: ctx.amount, description: ctx.description, category: useCat, source: 'whatsapp', module}).select().single();
+      const { error } = await supabase.from('movements').insert({user_id: user.id, type: ctx.type, amount: ctx.amount, description: ctx.description, category: useCat, source: 'whatsapp', module: user.plan}).select().single();
       if (!error) {
         await clearCtx();
-        const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', module);
+        const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', user.plan);
         const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
-        if (ctx.type === 'income') {
-          await sendWhatsApp(phone, `✅ *Ingreso guardado*\n\n💵 ${ctx.description}\n💰 +$${Number(ctx.amount).toLocaleString()}\n📂 ${useCat}\n${planNames[module]} ${module}\n\nBalance: *$${bal.toLocaleString()}* 📊`);
-        } else {
-          await sendWhatsApp(phone, `✅ *Gasto guardado*\n\n💸 ${ctx.description}\n💰 -$${Number(ctx.amount).toLocaleString()}\n📂 ${useCat}\n${planNames[module]} ${module}\n\nTe queda: *$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}`);
-        }
+        if (ctx.type === 'income') { await sendWhatsApp(phone, `✅ *Ingreso guardado*\n\n💵 ${ctx.description}\n💰 +$${Number(ctx.amount).toLocaleString()}\n📂 ${useCat}\n\nBalance: *$${bal.toLocaleString()}* 📊`); }
+        else { await sendWhatsApp(phone, `✅ *Gasto guardado*\n\n💸 ${ctx.description}\n💰 -$${Number(ctx.amount).toLocaleString()}\n📂 ${useCat}\n\nTe queda: *$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}`); }
       }
-    } else {
-      await sendWhatsApp(phone, `Elige una categoría:\n\n*1* Alimentación · *2* Arriendo · *3* Servicios\n*4* Transporte · *5* Salud · *6* Entretenimiento\n*7* Educación · *8* Proveedores · *9* Nómina\n*10* Ventas · *11* Salario · *0* Otros\n\nO escribe el nombre · _"cancelar"_ para anular`);
-    }
+    } else { await sendWhatsApp(phone, `Elige:\n*1* Alimentación · *2* Arriendo · *3* Servicios · *4* Transporte · *5* Salud · *6* Entretenimiento · *7* Educación · *8* Proveedores · *9* Nómina · *10* Ventas · *11* Salario · *0* Otros\n\n_"cancelar"_ para anular`); }
     return;
   }
-
-  // ═══ GASTO O INGRESO — parser con confirmación de categoría ═══
   const parsed = await parseWithAI(lower, user.name, user.plan);
   if (parsed) {
-    const module = user.plan || 'personal';
     const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
     const emoji = parsed.type === 'income' ? '💵' : '💸';
-    const label = parsed.type === 'income' ? 'ingreso' : 'gasto';
     await setCtx({step: 'confirm_cat', type: parsed.type, amount: parsed.amount, description: parsed.description, category: parsed.category});
-    await sendWhatsApp(phone,
-      `${emoji} Entendí un *${label}*:\n\n` +
-      `📝 *${parsed.description}*\n` +
-      `💰 $${parsed.amount.toLocaleString()}\n` +
-      `📂 Categoría sugerida: *${parsed.category}*\n` +
-      `📋 Módulo: *${planNames[module]}*\n\n` +
-      `¿Correcto? Escribe *sí* para guardar\n` +
-      `O elige otra categoría:\n` +
-      `*1* Alimentación · *2* Arriendo · *3* Servicios\n` +
-      `*4* Transporte · *5* Salud · *6* Entretenimiento\n` +
-      `*7* Educación · *8* Proveedores · *9* Nómina\n` +
-      `*10* Ventas · *11* Salario · *0* Otros\n` +
-      `❌ _"cancelar"_ para anular`
-    );
+    await sendWhatsApp(phone, `${emoji} Entendí un *${parsed.type==='income'?'ingreso':'gasto'}*:\n\n📝 *${parsed.description}*\n💰 $${parsed.amount.toLocaleString()}\n📂 Categoría: *${parsed.category}*\n📋 Módulo: *${planNames[user.plan]}*\n\n¿Correcto? Escribe *sí* para guardar\nO elige otra categoría:\n*1* Alimentación · *2* Arriendo · *3* Servicios · *4* Transporte · *5* Salud · *6* Entretenimiento · *7* Educación · *8* Proveedores · *9* Nómina · *10* Ventas · *11* Salario · *0* Otros\n❌ _"cancelar"_`);
     return;
   }
-
-  // ═══ NO ENTENDIÓ ═══
-  await sendWhatsApp(phone, `Mmm, no pillé eso 🤔\n\nPrueba así:\n💸 _"pagué luz 80mil"_\n💵 _"me ingresaron 200mil"_\n📊 _"cómo voy?"_\n📄 _"informe"_\n\nO escribe *ayuda* para ver todo.`);
+  await sendWhatsApp(phone, `Mmm, no pillé eso 🤔\n\n_"pagué luz 80mil"_ · _"me ingresaron 200mil"_ · _"cómo voy?"_\n\nO escribe *ayuda*`);
 }
 
-// ══════ BUSCAR USUARIO POR TELÉFONO (para debug y sync) ══════
+// ══════ BUSCAR USUARIO ══════
 app.get('/api/user/phone/:phone', async (req, res) => {
   try {
     const { data: user } = await supabase.from('users').select('id, name, phone, plan, role, status, created_at').eq('phone', req.params.phone).single();
@@ -1125,91 +845,33 @@ app.get('/api/user/phone/:phone', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
 
-// ══════ PARSER FINANCIERO CON IA (Claude API) ══════
+// ══════ PARSER CON IA ══════
 async function parseWithAI(text, userName, plan) {
   try {
     const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY;
-    if (!ANTHROPIC_KEY) return parseFinancialMessage(text); // fallback si no hay key
-
+    if (!ANTHROPIC_KEY) return parseFinancialMessage(text);
     const res = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 300,
-      messages: [{
-        role: 'user',
-        content: `Eres el asistente financiero de MiCaja para Colombia. El usuario se llama ${userName||'usuario'} y usa el módulo ${plan||'personal'}.
-
-Analiza este mensaje y extrae la información financiera. Responde SOLO con JSON sin markdown:
-{"type":"income"|"expense"|"unknown","amount":number_in_COP,"description":"descripcion_limpia","category":"categoria"}
-
-Categorías válidas para gastos: Alimentación, Arriendo, Servicios, Transporte, Salud, Entretenimiento, Educación, Nómina, Proveedores, Mercancía, Otros
-Categorías para ingresos: Ventas, Salario, Freelance, Cobros, Otros ingresos
-
-Reglas:
-- "mil" = 1000, "millón/millones" = 1000000, "k" = 1000
-- Si no hay monto claro, type = "unknown"
-- Descripción debe ser corta y limpia (2-4 palabras max)
-- Detecta contexto colombiano: "fiao/fiado" = gasto, "abono" = ingreso, "cuota" = gasto
-
-Mensaje: "${text}"`
-      }]
-    }, {
-      headers: { 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }
-    });
-
-    const raw = res.data.content[0].text.trim();
-    const parsed = JSON.parse(raw);
+      model: 'claude-haiku-4-5-20251001', max_tokens: 300,
+      messages: [{ role: 'user', content: `Eres el asistente financiero de MiCaja para Colombia. Usuario: ${userName||'usuario'}, módulo: ${plan||'personal'}.\n\nAnaliza este mensaje y extrae información financiera. Responde SOLO con JSON sin markdown:\n{"type":"income"|"expense"|"unknown","amount":number_in_COP,"description":"descripcion_limpia","category":"categoria"}\n\nCategorías gastos: Alimentación, Arriendo, Servicios, Transporte, Salud, Entretenimiento, Educación, Nómina, Proveedores, Mercancía, Otros\nCategorías ingresos: Ventas, Salario, Freelance, Cobros, Otros ingresos\n\nReglas: "mil"=1000, "millón"=1000000, "k"=1000. Si no hay monto, type="unknown".\n\nMensaje: "${text}"` }]
+    }, { headers: { 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } });
+    const parsed = JSON.parse(res.data.content[0].text.trim());
     if (parsed.type === 'unknown' || !parsed.amount) return null;
     return parsed;
-  } catch (e) {
-    console.error('AI parse error:', e.message);
-    return parseFinancialMessage(text); // fallback al parser simple
-  }
+  } catch (e) { return parseFinancialMessage(text); }
 }
 
-// ══════ PARSER FINANCIERO SIMPLE (fallback) ══════
+// ══════ PARSER SIMPLE (fallback) ══════
 function parseFinancialMessage(text) {
-  let n = text
-    .replace(/(\d+)\s*mil/gi, (_,x) => String(Number(x)*1000))
-    .replace(/(\d+\.?\d*)\s*m(?:illones?)?/gi, (_,x) => String(Number(x)*1000000))
-    .replace(/(\d+)k/gi, (_,x) => String(Number(x)*1000));
-
+  let n = text.replace(/(\d+)\s*mil/gi, (_,x) => String(Number(x)*1000)).replace(/(\d+\.?\d*)\s*m(?:illones?)?/gi, (_,x) => String(Number(x)*1000000)).replace(/(\d+)k/gi, (_,x) => String(Number(x)*1000));
   const amtMatch = n.match(/\$?\s*([\d,.]+)/);
   if (!amtMatch) return null;
   const amount = parseFloat(amtMatch[1].replace(/[,.]/g, ''));
   if (!amount || amount <= 0) return null;
-
-  // Palabras de INGRESO — mucho más amplio
-  const incWords = [
-    'vendí','vendi','cobré','cobre','ingreso','me pagaron','recibí','recibi',
-    'venta','gané','gane','salario','sueldo','ingresaron','me ingresaron',
-    'entró','entro','llegó','llego','depositaron','me depositaron',
-    'abonaron','me abonaron','pagaron','recaudo','recaudé','recaude',
-    'facturé','facture','cobré','cobre','honorarios','comisión','comision',
-    'transferencia','transfer','me cayó','me cayo','cayó','cayeron'
-  ];
-
-  // Palabras de GASTO — para confirmar gasto
-  const expWords = [
-    'pagué','pague','gasté','gaste','compré','compre','cobró','cobro',
-    'salió','salio','pagamos','compramos','gastamos','invertí','invert'
-  ];
-
-  let type = 'expense'; // default
-  const textLower = n.toLowerCase();
-  for (const w of incWords) { if (textLower.includes(w)) { type = 'income'; break; } }
-  // Si detectó income pero también tiene palabra de gasto explícita, verificar contexto
-  if (type === 'expense') {
-    for (const w of expWords) { if (textLower.includes(w)) { type = 'expense'; break; } }
-  }
-
-  // Limpiar descripción
-  let desc = n
-    .replace(/\$?\s*[\d,.]+/g, '')
-    .replace(/pagué|pague|gasté|gaste|compré|compre|vendí|vendi|cobré|cobre|ingreso|me pagaron|recibí|recibi|gané|gane|ingresaron|me ingresaron|entró|entro|llegó|llego|depositaron|me depositaron/gi, '')
-    .replace(/^\s*(de|en|por|el|la|un|una|los|las|del|al)\s+/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
+  const incWords = ['vendí','vendi','cobré','cobre','ingreso','me pagaron','recibí','recibi','venta','gané','gane','salario','sueldo','ingresaron','me ingresaron','entró','entro','llegó','llego','depositaron','abonaron'];
+  let type = 'expense';
+  const tl = n.toLowerCase();
+  for (const w of incWords) { if (tl.includes(w)) { type = 'income'; break; } }
+  let desc = n.replace(/\$?\s*[\d,.]+/g,'').replace(/pagué|pague|gasté|gaste|compré|compre|vendí|vendi|cobré|cobre|ingreso|me pagaron|recibí|recibi|gané|gane|ingresaron|me ingresaron/gi,'').replace(/^\s*(de|en|por|el|la|un|una)\s+/i,'').replace(/\s+/g,' ').trim();
   if (!desc || desc.length < 2) desc = type === 'income' ? 'Ingreso' : 'Gasto';
   desc = desc.charAt(0).toUpperCase() + desc.slice(1);
   return { type, amount, description: desc, category: autoCategory(desc, type) };
@@ -1229,7 +891,7 @@ function autoCategory(desc, type) {
   if (/mercado|supermercado|comida|almuerzo|desayuno|cena|restaurante/i.test(d)) return 'Alimentación';
   if (/uber|taxi|bus|transporte|gasolina|parqueo/i.test(d)) return 'Transporte';
   if (/salud|médico|medico|farmacia|droguería|medicina/i.test(d)) return 'Salud';
-  if (/netflix|spotify|cine|entretenimiento|suscripción/i.test(d)) return 'Entretenimiento';
+  if (/netflix|spotify|cine|entretenimiento/i.test(d)) return 'Entretenimiento';
   if (/nómina|nomina|empleado|sueldo/i.test(d)) return 'Nómina';
   if (/proveedor|mercancía|inventario|insumo/i.test(d)) return 'Proveedores';
   if (/colegio|universidad|educación|curso/i.test(d)) return 'Educación';
@@ -1238,7 +900,7 @@ function autoCategory(desc, type) {
 
 // ══════ ENVIAR WHATSAPP ══════
 async function sendWhatsApp(to, message) {
-  if (!WA_TOKEN || !WA_PHONE_ID) { console.log(`[WA SIM] → ${to}: ${message}`); return; }
+  if (!WA_TOKEN || !WA_PHONE_ID) { console.log(`[WA SIM] → ${to}: ${message.substring(0,50)}...`); return; }
   try {
     const phone = to.replace(/[+\s-]/g, '');
     await axios.post(`https://graph.facebook.com/v18.0/${WA_PHONE_ID}/messages`, { messaging_product: 'whatsapp', to: phone, type: 'text', text: { body: message } }, { headers: { 'Authorization': `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
@@ -1246,37 +908,17 @@ async function sendWhatsApp(to, message) {
   } catch (err) { console.error('WA Error:', err.response?.data || err.message); }
 }
 
-// Enviar usando template aprobado por Meta (puede iniciar conversación con cualquier número)
-// Usar cuando el destinatario NO ha escrito al bot antes
-// Template name: micaja_resumen_viaje (debe estar aprobado en Meta Business Manager)
 async function sendWhatsAppTemplate(to, templateName, params) {
   if (!WA_TOKEN || !WA_PHONE_ID) { console.log(`[WA TEMPLATE SIM] → ${to}: ${templateName}`); return; }
   try {
     const phone = to.replace(/[+\s-]/g, '');
-    const components = [];
-    if (params && params.length) {
-      components.push({
-        type: 'body',
-        parameters: params.map(p => ({ type: 'text', text: String(p) }))
-      });
-    }
-    await axios.post(`https://graph.facebook.com/v18.0/${WA_PHONE_ID}/messages`, {
-      messaging_product: 'whatsapp',
-      to: phone,
-      type: 'template',
-      template: {
-        name: templateName,
-        language: { code: 'es' },
-        components
-      }
-    }, { headers: { 'Authorization': `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
+    const components = params && params.length ? [{ type: 'body', parameters: params.map(p => ({ type: 'text', text: String(p) })) }] : [];
+    await axios.post(`https://graph.facebook.com/v18.0/${WA_PHONE_ID}/messages`, { messaging_product: 'whatsapp', to: phone, type: 'template', template: { name: templateName, language: { code: 'es' }, components } }, { headers: { 'Authorization': `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
     console.log(`✅ WA Template "${templateName}" → ${phone}`);
   } catch (err) { console.error('WA Template Error:', err.response?.data || err.message); }
 }
 
-// ══════════════════════════════════════
-// ADMIN — Middleware de verificación
-// ══════════════════════════════════════
+// ══════ ADMIN ══════
 async function verifyAdmin(req, res, next) {
   const phone = req.headers['x-admin-phone'];
   if (!phone) return res.status(401).json({ error: 'No autorizado' });
@@ -1285,37 +927,28 @@ async function verifyAdmin(req, res, next) {
   next();
 }
 
-// Listar todos los usuarios con conteo de movimientos e ingresos
 app.get('/api/admin/users', verifyAdmin, async (req, res) => {
   try {
     const { data: users } = await supabase.from('users').select('*').order('created_at', { ascending: false });
     if (!users) return res.json({ ok: true, users: [] });
-
     const enriched = await Promise.all(users.map(async u => {
       const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', u.id);
-      const count = (movs || []).length;
-      const income = (movs || []).filter(m => m.type === 'income').reduce((s, m) => s + Number(m.amount), 0);
+      const count = (movs||[]).length;
+      const income = (movs||[]).filter(m => m.type==='income').reduce((s,m) => s+Number(m.amount), 0);
       const { pin: _, verify_code: __, ...safeUser } = u;
       return { ...safeUser, movement_count: count, income_total: income };
     }));
-
     res.json({ ok: true, users: enriched });
   } catch (err) { res.status(500).json({ error: 'Error al obtener usuarios' }); }
 });
 
-// Listar pagos para admin
 app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
   try {
-    const { data: payments } = await supabase
-      .from('payments')
-      .select('*, users(name, phone)')
-      .order('created_at', { ascending: false })
-      .limit(100);
+    const { data: payments } = await supabase.from('payments').select('*, users(name, phone)').order('created_at', { ascending: false }).limit(100);
     res.json({ ok: true, payments: payments || [] });
   } catch (err) { res.status(500).json({ error: 'Error al obtener pagos' }); }
 });
 
-// Editar usuario (PIN, rol, estado, plan, nombre)
 app.put('/api/admin/users/:id', verifyAdmin, async (req, res) => {
   try {
     const { name, pin, plan, role, status } = req.body;
@@ -1325,7 +958,6 @@ app.put('/api/admin/users/:id', verifyAdmin, async (req, res) => {
     if (plan) updates.plan = plan;
     if (role) updates.role = role;
     if (status) updates.status = status;
-
     const { data, error } = await supabase.from('users').update(updates).eq('id', req.params.id).select().single();
     if (error) throw error;
     const { pin: _, ...safeUser } = data;
@@ -1333,30 +965,20 @@ app.put('/api/admin/users/:id', verifyAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al actualizar usuario' }); }
 });
 
-// Ver datos completos de un usuario (para admin)
 app.get('/api/admin/users/:id/data', verifyAdmin, async (req, res) => {
   try {
     const { data: user } = await supabase.from('users').select('*').eq('id', req.params.id).single();
-    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-
+    if (!user) return res.status(404).json({ error: 'No encontrado' });
     const { data: movs } = await supabase.from('movements').select('*').eq('user_id', req.params.id).order('created_at', { ascending: false });
     const { data: trips } = await supabase.from('trips').select('*, trip_expenses(*)').eq('user_id', req.params.id);
-
-    const income = (movs || []).filter(m => m.type === 'income').reduce((s, m) => s + Number(m.amount), 0);
-    const expense = (movs || []).filter(m => m.type === 'expense').reduce((s, m) => s + Number(m.amount), 0);
-
+    const income = (movs||[]).filter(m => m.type==='income').reduce((s,m) => s+Number(m.amount), 0);
+    const expense = (movs||[]).filter(m => m.type==='expense').reduce((s,m) => s+Number(m.amount), 0);
     const { pin: _, ...safeUser } = user;
-    res.json({
-      ok: true,
-      user: safeUser,
-      summary: { income, expense, balance: income - expense, count: (movs || []).length },
-      movements: movs || [],
-      trips: trips || []
-    });
+    res.json({ ok: true, user: safeUser, summary: { income, expense, balance: income-expense, count: (movs||[]).length }, movements: movs||[], trips: trips||[] });
   } catch (err) { res.status(500).json({ error: 'Error al obtener datos' }); }
 });
 
-// Obtener configuración del usuario (ingresos de pareja, etc.)
+// ══════ USUARIOS ══════
 app.get('/api/users/:id/config', async (req, res) => {
   try {
     const { data } = await supabase.from('user_config').select('*').eq('user_id', req.params.id).single();
@@ -1364,20 +986,15 @@ app.get('/api/users/:id/config', async (req, res) => {
   } catch (err) { res.json({ ok: true, config: null }); }
 });
 
-// Guardar configuración del usuario
 app.post('/api/users/:id/config', async (req, res) => {
   try {
     const { partner_name, partner_income_a, partner_income_b } = req.body;
-    const { data, error } = await supabase.from('user_config').upsert({
-      user_id: req.params.id, partner_name, partner_income_a, partner_income_b,
-      updated_at: new Date()
-    }, { onConflict: 'user_id' }).select().single();
+    const { data, error } = await supabase.from('user_config').upsert({ user_id: req.params.id, partner_name, partner_income_a, partner_income_b, updated_at: new Date() }, { onConflict: 'user_id' }).select().single();
     if (error) throw error;
     res.json({ ok: true, config: data });
   } catch (err) { res.status(500).json({ error: 'Error al guardar configuración' }); }
 });
 
-// Actualizar datos del usuario (nombre negocio, nombre, etc.)
 app.put('/api/users/:id', async (req, res) => {
   try {
     const allowed = ['name', 'business_name', 'partner_name', 'plan'];
@@ -1391,9 +1008,7 @@ app.put('/api/users/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al actualizar' }); }
 });
 
-// ══════════════════════════════════════
-// DEUDAS — Qué debo / Qué me deben
-// ══════════════════════════════════════
+// ══════ DEUDAS ══════
 app.get('/api/debts/:userId', async (req, res) => {
   try {
     const { data, error } = await supabase.from('debts').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
@@ -1406,7 +1021,7 @@ app.post('/api/debts', async (req, res) => {
   try {
     const { user_id, type, person_name, amount, description, due_date, note } = req.body;
     if (!user_id || !type || !person_name || !amount) return res.status(400).json({ error: 'Campos requeridos' });
-    const { data, error } = await supabase.from('debts').insert({ user_id, type, person_name, amount, description, due_date: due_date || null, note, status: 'pending', paid: 0 }).select().single();
+    const { data, error } = await supabase.from('debts').insert({ user_id, type, person_name, amount, description, due_date: due_date||null, note, status: 'pending', paid: 0 }).select().single();
     if (error) throw error;
     res.json({ ok: true, debt: data });
   } catch (err) { res.status(500).json({ error: 'Error al crear deuda' }); }
@@ -1417,7 +1032,7 @@ app.post('/api/debts/:id/abono', async (req, res) => {
     const { amount } = req.body;
     const { data: debt } = await supabase.from('debts').select('amount, paid').eq('id', req.params.id).single();
     if (!debt) return res.status(404).json({ error: 'No encontrada' });
-    const newPaid = Number(debt.paid || 0) + Number(amount);
+    const newPaid = Number(debt.paid||0) + Number(amount);
     const newStatus = newPaid >= Number(debt.amount) ? 'paid' : 'partial';
     const { data, error } = await supabase.from('debts').update({ paid: newPaid, status: newStatus }).eq('id', req.params.id).select().single();
     if (error) throw error;
@@ -1440,206 +1055,85 @@ app.delete('/api/debts/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
 
-// Generar link de pago directo por teléfono (para WhatsApp)
+// ══════ PAGOS BOLD ══════
 app.get('/api/payments/link/:phone', async (req, res) => {
   try {
     const phone = req.params.phone;
     const { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-
     const orderId = `MICAJA-${user.id.slice(0,8)}-${Date.now()}`;
-    const amount = '20000';
-    const currency = 'COP';
-    const integString = `${orderId}${amount}${currency}${BOLD_SECRET_KEY}`;
+    const integString = `${orderId}20000COP${BOLD_SECRET_KEY}`;
     const integritySignature = crypto.createHash('sha256').update(integString).digest('hex');
-
-    // Token temporal (expira en 30 min)
     const token = crypto.createHash('sha256').update(`${phone}-${Date.now()}-${BOLD_SECRET_KEY}`).digest('hex').slice(0, 16);
     const tokenExpiry = Date.now() + 30*60*1000;
-
-    // Guardar pago pendiente CON el token
-    await supabase.from('payments').insert({
-      user_id: user.id, amount: 20000, method: 'bold',
-      reference: orderId, status: 'pending',
-      pay_token: token, token_expiry: tokenExpiry,
-      period_start: new Date().toISOString().split('T')[0],
-      period_end: new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0]
-    });
-
-    const payUrl = `https://milkomercios.in/MiCaja/pagar.html?tel=${phone}&token=${token}`;
-    res.json({ ok: true, url: payUrl });
-  } catch (err) {
-    console.error('Payment link error:', err);
-    res.status(500).json({ error: 'Error generando link' });
-  }
+    await supabase.from('payments').insert({ user_id: user.id, amount: 20000, method: 'bold', reference: orderId, status: 'pending', pay_token: token, token_expiry: tokenExpiry, period_start: new Date().toISOString().split('T')[0], period_end: new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0] });
+    res.json({ ok: true, url: `https://milkomercios.in/MiCaja/pagar.html?tel=${phone}&token=${token}` });
+  } catch (err) { res.status(500).json({ error: 'Error generando link' }); }
 });
 
-// Obtener datos de pago por token (pagar.html lo llama)
 app.get('/api/payments/token/:phone/:token', async (req, res) => {
   try {
     const { phone, token } = req.params;
-
-    // Buscar en tabla payments por teléfono + token
     const { data: user } = await supabase.from('users').select('id').eq('phone', phone).single();
     if (!user) return res.status(404).json({ error: 'Token no encontrado' });
-
-    const { data: payment } = await supabase
-      .from('payments')
-      .select('*')
-      .eq('user_id', user.id)
-      .eq('pay_token', token)
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-
+    const { data: payment } = await supabase.from('payments').select('*').eq('user_id', user.id).eq('pay_token', token).eq('status', 'pending').order('created_at', { ascending: false }).limit(1).single();
     if (!payment) return res.status(404).json({ error: 'Token no encontrado' });
     if (payment.token_expiry < Date.now()) return res.status(401).json({ error: 'Token expirado' });
-
-    // Recalcular integritySignature con el monto correcto en pesos
     const integString = `${payment.reference}20000COP${BOLD_SECRET_KEY}`;
     const integritySignature = crypto.createHash('sha256').update(integString).digest('hex');
-
-    res.json({
-      ok: true,
-      orderId: payment.reference,
-      amount: '20000',
-      currency: 'COP',
-      integritySignature,
-      apiKey: BOLD_API_KEY,
-      redirectionUrl: 'https://milkomercios.in/MiCaja/pagar.html',
-      description: 'MiCaja - Suscripción mensual $20.000'
-    });
-  } catch (err) {
-    console.error('Token lookup error:', err);
-    res.status(500).json({ error: 'Error verificando token' });
-  }
+    res.json({ ok: true, orderId: payment.reference, amount: '20000', currency: 'COP', integritySignature, apiKey: BOLD_API_KEY, redirectionUrl: 'https://milkomercios.in/MiCaja/pagar.html', description: 'MiCaja - Suscripción mensual $20.000' });
+  } catch (err) { res.status(500).json({ error: 'Error verificando token' }); }
 });
 
-// Generar parámetros de pago Bold (el checkout se abre desde el frontend web)
 app.post('/api/payments/create', async (req, res) => {
   try {
     const { user_id, plan_type = 'mensual' } = req.body;
     if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
-
     const { data: user } = await supabase.from('users').select('name, phone').eq('id', user_id).single();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-
-    // Configurar según plan
-    const plans = {
-      mensual:  { amount: '20000',  label: 'Suscripción mensual $20.000',   days: 30 },
-      anual:    { amount: '200000', label: 'Suscripción anual $200.000',    days: 365 },
-      lifetime: { amount: '320000', label: 'Acceso de por vida $320.000',   days: 36500 }
-    };
+    const plans = { mensual: { amount: '20000', label: 'Suscripción mensual $20.000', days: 30 }, anual: { amount: '200000', label: 'Suscripción anual $200.000', days: 365 }, lifetime: { amount: '320000', label: 'Acceso de por vida $320.000', days: 36500 } };
     const plan = plans[plan_type] || plans.mensual;
-
     const orderId = `MICAJA-${user_id.slice(0,8)}-${Date.now()}`;
-    const currency = 'COP';
-    const integString = `${orderId}${plan.amount}${currency}${BOLD_SECRET_KEY}`;
+    const integString = `${orderId}${plan.amount}COP${BOLD_SECRET_KEY}`;
     const integritySignature = crypto.createHash('sha256').update(integString).digest('hex');
-
-    await supabase.from('payments').insert({
-      user_id, amount: parseInt(plan.amount), method: 'bold',
-      reference: orderId, status: 'pending', plan_type,
-      period_start: new Date().toISOString().split('T')[0],
-      period_end: new Date(Date.now() + plan.days*24*60*60*1000).toISOString().split('T')[0]
-    });
-
-    res.json({
-      ok: true, orderId, amount: plan.amount, currency,
-      integritySignature, apiKey: BOLD_API_KEY,
-      redirectionUrl: 'https://milkomercios.in/MiCaja/dashboard.html',
-      description: plan.label
-    });
-  } catch (err) {
-    console.error('Bold create error:', err);
-    res.status(500).json({ error: 'Error al crear pago' });
-  }
+    await supabase.from('payments').insert({ user_id, amount: parseInt(plan.amount), method: 'bold', reference: orderId, status: 'pending', plan_type, period_start: new Date().toISOString().split('T')[0], period_end: new Date(Date.now() + plan.days*24*60*60*1000).toISOString().split('T')[0] });
+    res.json({ ok: true, orderId, amount: plan.amount, currency: 'COP', integritySignature, apiKey: BOLD_API_KEY, redirectionUrl: 'https://milkomercios.in/MiCaja/dashboard.html', description: plan.label });
+  } catch (err) { res.status(500).json({ error: 'Error al crear pago' }); }
 });
 
-// Webhook de confirmación de pago Bold
 app.post('/api/payments/bold-webhook', async (req, res) => {
   try {
     const event = req.body;
-    console.log('💳 Bold webhook:', JSON.stringify(event));
-
-    // Verificar que el pago fue aprobado
-    if (event.type !== 'TRANSACTION' || event.data?.transaction?.status !== 'APPROVED') {
-      return res.sendStatus(200);
-    }
-
+    if (event.type !== 'TRANSACTION' || event.data?.transaction?.status !== 'APPROVED') return res.sendStatus(200);
     const orderId = event.data?.transaction?.order_id || event.data?.transaction?.orderId;
     if (!orderId) return res.sendStatus(200);
-
-    // Extraer user_id del orderId (formato: MICAJA-{userId8chars}-{timestamp})
     const parts = orderId.split('-');
     if (parts.length < 2) return res.sendStatus(200);
     const userIdPrefix = parts[1];
-
-    // Buscar el pago pendiente
-    const { data: payment } = await supabase
-      .from('payments')
-      .select('*, users(*)')
-      .ilike('reference', `MICAJA-${userIdPrefix}%`)
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-
+    const { data: payment } = await supabase.from('payments').select('*, users(*)').ilike('reference', `MICAJA-${userIdPrefix}%`).eq('status', 'pending').order('created_at', { ascending: false }).limit(1).single();
     if (!payment) return res.sendStatus(200);
-
-    // Actualizar pago a pagado
     await supabase.from('payments').update({ status: 'paid' }).eq('id', payment.id);
-
-    // Activar usuario si estaba inactivo
     await supabase.from('users').update({ status: 'active' }).eq('id', payment.user_id);
-
-    // Notificar por WhatsApp
     const userPhone = payment.users?.phone;
-    if (userPhone && WA_TOKEN) {
-      await sendWhatsApp(userPhone,
-        `✅ *¡Pago recibido!*\n\n` +
-        `💰 $20.000 COP — MiCaja mensual\n` +
-        `📅 Válido hasta: ${payment.period_end}\n` +
-        `🔢 Ref: ${orderId}\n\n` +
-        `¡Gracias! Tu acceso está activo 🚀\n` +
-        `Sigue usando MiCaja por WhatsApp o en:\n` +
-        `🌐 milkomercios.in/MiCaja/dashboard.html`
-      );
-    }
-
+    if (userPhone && WA_TOKEN) await sendWhatsApp(userPhone, `✅ *¡Pago recibido!*\n\n💰 $20.000 COP — MiCaja mensual\n📅 Válido hasta: ${payment.period_end}\n🔢 Ref: ${orderId}\n\n¡Gracias! Tu acceso está activo 🚀\n🌐 milkomercios.in/MiCaja/dashboard.html`);
     res.sendStatus(200);
-  } catch (err) {
-    console.error('Bold webhook error:', err);
-    res.sendStatus(200);
-  }
+  } catch (err) { console.error('Bold webhook error:', err); res.sendStatus(200); }
 });
 
-// Consultar estado de suscripción
 app.get('/api/payments/status/:userId', async (req, res) => {
   try {
-    const { data: payment } = await supabase
-      .from('payments')
-      .select('*')
-      .eq('user_id', req.params.userId)
-      .eq('status', 'paid')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-
+    const { data: payment } = await supabase.from('payments').select('*').eq('user_id', req.params.userId).eq('status', 'paid').order('created_at', { ascending: false }).limit(1).single();
     if (!payment) return res.json({ ok: true, active: false });
-
     const expired = payment.period_end < new Date().toISOString().split('T')[0];
     res.json({ ok: true, active: !expired, payment });
-  } catch (err) {
-    res.json({ ok: true, active: false });
-  }
+  } catch (err) { res.json({ ok: true, active: false }); }
 });
 
 // ══════ INICIAR ══════
 app.listen(PORT, () => {
-  console.log(`⚡ MiCaja Backend v2 en puerto ${PORT}`);
+  console.log(`⚡ MiCaja Backend v2.1 en puerto ${PORT}`);
   console.log(`📊 Supabase: ${SUPABASE_URL ? '✅' : '⚠️'}`);
   console.log(`📱 WhatsApp: ${WA_TOKEN ? '✅' : '⚠️ simulado'}`);
   console.log(`💳 Bold: ${BOLD_API_KEY ? '✅' : '⚠️ sin configurar'}`);
+  console.log(`🛡️ Rate limiting: ✅ activo`);
 });
