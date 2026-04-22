@@ -228,6 +228,35 @@ app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al ingresar' }); }
 });
 
+// ══════ MAGIC TOKEN LOGIN (desde WhatsApp) ══════
+// El usuario escribe "web" al bot, recibe link con token de un solo uso
+app.post('/api/auth/magic', async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'Token requerido' });
+
+    const { data: user } = await supabase
+      .from('users')
+      .select('*')
+      .eq('magic_token', token)
+      .single();
+
+    if (!user) return res.status(401).json({ error: 'Link inválido o ya usado' });
+    if (!user.magic_token_expiry || user.magic_token_expiry < Date.now()) {
+      return res.status(401).json({ error: 'Link expirado. Escribe "web" al bot para obtener uno nuevo.' });
+    }
+
+    // Invalidar token — un solo uso
+    await supabase.from('users').update({
+      magic_token: null,
+      magic_token_expiry: null
+    }).eq('id', user.id);
+
+    const { pin: _, verify_code: __, magic_token: ___, magic_token_expiry: ____, ...safeUser } = user;
+    res.json({ ok: true, user: safeUser });
+  } catch (err) { res.status(500).json({ error: 'Error al verificar token' }); }
+});
+
 app.post('/api/auth/reset-pin', rateLimit(3, 10), async (req, res) => {
   try {
     const { phone: rawPhone } = req.body;
@@ -841,9 +870,27 @@ async function processWhatsAppMessage(phone, text) {
     await sendWhatsApp(phone, `💵 *${persona}* te debe *$${amount.toLocaleString()}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
     return;
   }
-  const webCmds = ['web','link','portal','dashboard','login','entrar','ingresar','acceder','mi cuenta'];
+  const webCmds = ['web','link','portal','dashboard','login','entrar','ingresar','acceder','mi cuenta','acceso web','entrar a la web'];
   if (webCmds.includes(lower) || webCmds.some(c => lower.includes(c))) {
-    await sendWhatsApp(phone, `🌐 *Accede a MiCaja:*\n\n👉 milkomercios.in/MiCaja/login.html\n\n📱 Tu número: *${phone}*\n🔐 Tu PIN: *${user.pin}*`);
+    try {
+      // Generar token mágico de un solo uso — expira en 10 minutos
+      const magicToken = crypto.randomBytes(20).toString('hex');
+      const expiresAt = Date.now() + 10 * 60 * 1000;
+      // Guardar en users temporalmente
+      await supabase.from('users').update({
+        magic_token: magicToken,
+        magic_token_expiry: expiresAt
+      }).eq('id', user.id);
+      const link = `https://milkomercios.in/MiCaja/login.html?magic=${magicToken}`;
+      await sendWhatsApp(phone,
+        `🔐 *Tu acceso directo a MiCaja:*\n\n` +
+        `👉 ${link}\n\n` +
+        `⏱ _Este link expira en 10 minutos y es de un solo uso._\n` +
+        `_Nadie más puede usarlo — es solo tuyo._`
+      );
+    } catch(e) {
+      await sendWhatsApp(phone, `🌐 milkomercios.in/MiCaja/login.html\n\n📱 ${phone}\n🔐 PIN: ${user.pin}`);
+    }
     return;
   }
   if (['pagar','suscripción','suscripcion','renovar','activar'].includes(lower)) {
