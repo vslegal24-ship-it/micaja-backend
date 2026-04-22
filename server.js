@@ -192,17 +192,6 @@ app.post('/api/auth/reset-pin', async (req, res) => {
 });
 
 // ══════ MOVIMIENTOS ══════
-// Proteger todas las rutas de datos con verifySession
-// Excepciones públicas: auth, webhook, pagos-publico, health
-app.use('/api/movements', verifySession);
-app.use('/api/summary', verifySession);
-app.use('/api/trips', verifySession);
-app.use('/api/debts', verifySession);
-app.use('/api/payment-methods', verifySession);
-app.use('/api/travel-friends', verifySession);
-app.use('/api/users', verifySession);
-app.use('/api/admin', verifySession);
-
 // Obtener movimientos filtrados por módulo
 app.get('/api/movements/:userId', async (req, res) => {
   try {
