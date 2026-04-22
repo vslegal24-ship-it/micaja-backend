@@ -223,6 +223,17 @@ app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
     if (user.status === 'pending') return res.status(403).json({ error: 'Cuenta pendiente de verificación. Revisa tu WhatsApp.' });
     if (user.status === 'inactive') return res.status(403).json({ error: 'Cuenta inactiva. Contacta soporte.' });
 
+    // Notificación de seguridad por WhatsApp
+    const hora = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' });
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'desconocida';
+    sendWhatsApp(phone,
+      `🔐 *Nuevo ingreso a MiCaja*\n\n` +
+      `✅ Se inició sesión en la web\n` +
+      `📅 ${hora}\n` +
+      `🌐 IP: ${ip}\n\n` +
+      `_Si no fuiste tú, cambia tu PIN ahora:\nEscríbeme "cambiar pin 1234" (pon tus 4 dígitos)_`
+    ).catch(() => {}); // No bloquear el login si falla el WA
+
     const { pin: _, verify_code: __, ...safeUser } = user;
     res.json({ ok: true, user: safeUser });
   } catch (err) { res.status(500).json({ error: 'Error al ingresar' }); }
