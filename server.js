@@ -37,6 +37,51 @@ function normalizePhone(phone) {
   return p; // devolver como está si no encaja
 }
 
+// ══════════════════════════════════════
+// SESIÓN CON TOKEN — generado en login,
+// validado en todos los endpoints protegidos
+// ══════════════════════════════════════
+const crypto = require('crypto');
+
+function generateSessionToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// Middleware — verifica que el token de sesión sea válido
+// y que el userId del token coincida con el de la URL
+async function verifySession(req, res, next) {
+  try {
+    const token = req.headers['x-session-token'];
+    const userIdFromUrl = req.params.userId || req.params.id || req.body?.user_id;
+
+    if (!token) return res.status(401).json({ error: 'Sesión requerida' });
+
+    // Buscar token en Supabase
+    const { data: session } = await supabase
+      .from('sessions')
+      .select('user_id, expires_at')
+      .eq('token', token)
+      .single();
+
+    if (!session) return res.status(401).json({ error: 'Sesión inválida' });
+    if (new Date(session.expires_at) < new Date()) {
+      await supabase.from('sessions').delete().eq('token', token);
+      return res.status(401).json({ error: 'Sesión expirada. Ingresa de nuevo.' });
+    }
+
+    // Si la URL tiene un userId, verificar que coincida con el token
+    if (userIdFromUrl && userIdFromUrl !== session.user_id) {
+      return res.status(403).json({ error: 'Sin acceso a estos datos' });
+    }
+
+    // Agregar user_id al request para usarlo en el endpoint
+    req.sessionUserId = session.user_id;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Error de sesión' });
+  }
+}
+
 // ══════ AUTH ══════
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -113,8 +158,23 @@ app.post('/api/auth/login', async (req, res) => {
     const { data: user, error } = await supabase.from('users').select('*').eq('phone', phone).eq('pin', pin).single();
     if (error || !user) return res.status(401).json({ error: 'Número o PIN incorrecto' });
     if (user.status === 'pending') return res.status(403).json({ error: 'Cuenta pendiente de verificación. Revisa tu WhatsApp.' });
+    if (user.status === 'inactive') return res.status(403).json({ error: 'Cuenta inactiva. Contacta soporte.' });
+
+    // Generar token de sesión (expira en 30 días)
+    const sessionToken = generateSessionToken();
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Guardar sesión — eliminar sesiones viejas del mismo usuario primero
+    await supabase.from('sessions').delete().eq('user_id', user.id);
+    await supabase.from('sessions').insert({
+      user_id: user.id,
+      token: sessionToken,
+      expires_at: expiresAt,
+      created_at: new Date().toISOString()
+    });
+
     const { pin: _, verify_code: __, ...safeUser } = user;
-    res.json({ ok: true, user: safeUser });
+    res.json({ ok: true, user: safeUser, sessionToken });
   } catch (err) { res.status(500).json({ error: 'Error al ingresar' }); }
 });
 
@@ -132,6 +192,17 @@ app.post('/api/auth/reset-pin', async (req, res) => {
 });
 
 // ══════ MOVIMIENTOS ══════
+// Proteger todas las rutas de datos con verifySession
+// Excepciones públicas: auth, webhook, pagos-publico, health
+app.use('/api/movements', verifySession);
+app.use('/api/summary', verifySession);
+app.use('/api/trips', verifySession);
+app.use('/api/debts', verifySession);
+app.use('/api/payment-methods', verifySession);
+app.use('/api/travel-friends', verifySession);
+app.use('/api/users', verifySession);
+app.use('/api/admin', verifySession);
+
 // Obtener movimientos filtrados por módulo
 app.get('/api/movements/:userId', async (req, res) => {
   try {
@@ -554,7 +625,7 @@ app.post('/api/payment-methods/:userId/token', async (req, res) => {
     const { data: user } = await supabase.from('users').select('id, name, pay_token').eq('id', req.params.userId).single();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
     if (user.pay_token) return res.json({ ok: true, token: user.pay_token });
-    const token = require('crypto').randomBytes(12).toString('hex');
+    const token = crypto.randomBytes(12).toString('hex');
     await supabase.from('users').update({ pay_token: token }).eq('id', req.params.userId);
     res.json({ ok: true, token });
   } catch (err) { res.status(500).json({ error: 'Error al generar token' }); }
@@ -563,7 +634,7 @@ app.post('/api/payment-methods/:userId/token', async (req, res) => {
 // Resetear token — el anterior deja de funcionar
 app.post('/api/payment-methods/:userId/token/reset', async (req, res) => {
   try {
-    const token = require('crypto').randomBytes(12).toString('hex');
+    const token = crypto.randomBytes(12).toString('hex');
     await supabase.from('users').update({ pay_token: token }).eq('id', req.params.userId);
     res.json({ ok: true, token });
   } catch (err) { res.status(500).json({ error: 'Error al regenerar token' }); }
@@ -1379,7 +1450,6 @@ app.delete('/api/debts/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
-const crypto = require('crypto');
 
 // Generar link de pago directo por teléfono (para WhatsApp)
 app.get('/api/payments/link/:phone', async (req, res) => {
