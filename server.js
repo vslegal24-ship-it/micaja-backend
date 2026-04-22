@@ -74,7 +74,7 @@ function rateLimit(maxPerMinute, maxPerHour) {
 // Rate limit para WhatsApp — más estricto para evitar spam del bot
 const waMessageStore = new Map(); // { phone: { count, resetAt } }
 
-function rateLimitWA(phone, maxPerDay = 100, maxPerMinute = 10) {
+function rateLimitWA(phone, maxPerDay = 150, maxPerMinute = 15) {
   const now = Date.now();
   const entry = waMessageStore.get(phone) || {
     dayCount: 0, dayResetAt: now + 86400000,
@@ -105,8 +105,8 @@ function normalizePhone(phone) {
 }
 
 // ══════ AUTH ══════
-// Rate limit en login: 10 intentos/min, 30/hora (protege contra fuerza bruta)
-app.post('/api/auth/register', rateLimit(5, 20), async (req, res) => {
+// Registro web: poco usado (registro real es por WA), límite generoso
+app.post('/api/auth/register', rateLimit(3, 10), async (req, res) => {
   try {
     const { phone: rawPhone, name, pin, plan, partner_phone, partner_name, business_name } = req.body;
     if (!rawPhone || !pin || pin.length !== 4) return res.status(400).json({ error: 'Teléfono y PIN de 4 dígitos requeridos' });
@@ -153,16 +153,76 @@ app.post('/api/auth/verify', rateLimit(10, 30), async (req, res) => {
   }
 });
 
-// Login con rate limit anti fuerza bruta
+// Contador de intentos fallidos en memoria (se limpia si Railway reinicia — aceptable)
+const loginAttempts = new Map(); // { phone: { count, lockedUntil } }
+
 app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
   try {
     const { phone: rawPhone, pin } = req.body;
     if (!rawPhone || !pin) return res.status(400).json({ error: 'Teléfono y PIN requeridos' });
     const phone = normalizePhone(rawPhone);
+
+    // Verificar si está bloqueado
+    const attempts = loginAttempts.get(phone) || { count: 0, lockedUntil: 0 };
+    const now = Date.now();
+
+    if (attempts.lockedUntil > now) {
+      const minutosRestantes = Math.ceil((attempts.lockedUntil - now) / 60000);
+      return res.status(429).json({
+        error: `Cuenta bloqueada temporalmente. Intenta en ${minutosRestantes} minuto${minutosRestantes > 1 ? 's' : ''}.`,
+        lockedMinutes: minutosRestantes
+      });
+    }
+
+    // Buscar usuario SIN el PIN primero (para saber si existe)
+    const { data: userExists } = await supabase.from('users').select('id, status').eq('phone', phone).single();
+
+    if (!userExists) {
+      // Teléfono no existe — no revelar si es el PIN o el número el incorrecto
+      return res.status(401).json({ error: 'Número o PIN incorrecto' });
+    }
+
+    // Verificar PIN
     const { data: user, error } = await supabase.from('users').select('*').eq('phone', phone).eq('pin', pin).single();
-    if (error || !user) return res.status(401).json({ error: 'Número o PIN incorrecto' });
+
+    if (error || !user) {
+      // PIN incorrecto — incrementar contador
+      attempts.count += 1;
+
+      // Delay progresivo: 1s, 2s, 4s, 8s, bloqueo
+      const delays = [0, 1000, 2000, 4000, 8000];
+      const delayMs = delays[Math.min(attempts.count - 1, delays.length - 1)];
+
+      if (attempts.count >= 5) {
+        // Bloqueo de 15 minutos
+        attempts.lockedUntil = now + 15 * 60 * 1000;
+        attempts.count = 0;
+        loginAttempts.set(phone, attempts);
+        console.warn(`🔒 Login bloqueado: ${phone} — 5 intentos fallidos`);
+        return res.status(429).json({
+          error: 'Demasiados intentos fallidos. Cuenta bloqueada 15 minutos.',
+          lockedMinutes: 15
+        });
+      }
+
+      loginAttempts.set(phone, attempts);
+
+      // Aplicar delay antes de responder
+      if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+
+      const intentosRestantes = 5 - attempts.count;
+      return res.status(401).json({
+        error: `PIN incorrecto. ${intentosRestantes} intento${intentosRestantes !== 1 ? 's' : ''} restante${intentosRestantes !== 1 ? 's' : ''}.`,
+        attemptsLeft: intentosRestantes
+      });
+    }
+
+    // Login exitoso — limpiar contador de intentos
+    loginAttempts.delete(phone);
+
     if (user.status === 'pending') return res.status(403).json({ error: 'Cuenta pendiente de verificación. Revisa tu WhatsApp.' });
     if (user.status === 'inactive') return res.status(403).json({ error: 'Cuenta inactiva. Contacta soporte.' });
+
     const { pin: _, verify_code: __, ...safeUser } = user;
     res.json({ ok: true, user: safeUser });
   } catch (err) { res.status(500).json({ error: 'Error al ingresar' }); }
