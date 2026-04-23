@@ -285,11 +285,9 @@ app.post('/api/auth/reset-pin', rateLimit(3, 10), async (req, res) => {
 app.get('/api/movements/:userId', async (req, res) => {
   try {
     const { module, period } = req.query;
-    let query = supabase.from('movements').select('*').eq('user_id', req.params.userId).order('date', { ascending: false }).limit(200);
+    let query = supabase.from('movements').select('*').eq('user_id', req.params.userId).order('date', { ascending: false }).limit(500);
     if (module) query = query.eq('module', module);
-    // Si piden el mes actual (sin period), solo los del período abierto
-    if (!period) query = query.is('period_id', null);
-    // Si piden un período específico
+    // Solo filtrar por period_id si se pide explícitamente
     if (period) query = query.eq('period_id', period);
     const { data, error } = await query;
     if (error) throw error;
