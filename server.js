@@ -295,7 +295,48 @@ app.get('/api/movements/:userId', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al obtener movimientos' }); }
 });
 
-// ══════ RESUMEN POR MÓDULO ══════
+// ══════ DEBT CONTACTS ══════
+app.get('/api/debt-contacts/:userId', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('debt_contacts').select('*').eq('user_id', req.params.userId).order('nombre');
+    if (error) throw error;
+    res.json({ ok: true, contacts: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Error al obtener contactos' }); }
+});
+
+app.post('/api/debt-contacts', async (req, res) => {
+  try {
+    const { user_id, nombre, tel, tipo, nota } = req.body;
+    if (!user_id || !nombre) return res.status(400).json({ error: 'user_id y nombre requeridos' });
+    const { data, error } = await supabase.from('debt_contacts').insert({ user_id, nombre, tel: tel||null, tipo: tipo||'ambos', nota: nota||null }).select().single();
+    if (error) throw error;
+    res.json({ ok: true, contact: data });
+  } catch (err) { res.status(500).json({ error: 'Error al crear contacto' }); }
+});
+
+app.put('/api/debt-contacts/:id', async (req, res) => {
+  try {
+    const { nombre, tel, tipo, nota } = req.body;
+    const updates = {};
+    if (nombre !== undefined) updates.nombre = nombre;
+    if (tel !== undefined) updates.tel = tel || null;
+    if (tipo !== undefined) updates.tipo = tipo;
+    if (nota !== undefined) updates.nota = nota || null;
+    const { data, error } = await supabase.from('debt_contacts').update(updates).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ ok: true, contact: data });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar contacto' }); }
+});
+
+app.delete('/api/debt-contacts/:id', async (req, res) => {
+  try {
+    const { error } = await supabase.from('debt_contacts').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error al eliminar contacto' }); }
+});
+
+
 
 app.post('/api/movements', async (req, res) => {
   try {
