@@ -1162,6 +1162,21 @@ app.post('/api/debts/:id/abono', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al registrar abono' }); }
 });
 
+app.put('/api/debts/:id', async (req, res) => {
+  try {
+    const { person_name, amount, description, due_date, note } = req.body;
+    const updates = {};
+    if (person_name !== undefined) updates.person_name = person_name;
+    if (amount !== undefined) updates.amount = amount;
+    if (description !== undefined) updates.description = description;
+    if (due_date !== undefined) updates.due_date = due_date || null;
+    if (note !== undefined) updates.note = note;
+    const { data, error } = await supabase.from('debts').update(updates).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ ok: true, debt: data });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar deuda' }); }
+});
+
 app.put('/api/debts/:id/paid', async (req, res) => {
   try {
     const { data: debt } = await supabase.from('debts').select('amount').eq('id', req.params.id).single();
