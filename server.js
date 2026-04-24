@@ -308,6 +308,22 @@ app.post('/api/movements', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al crear movimiento' }); }
 });
 
+app.put('/api/movements/:id', async (req, res) => {
+  try {
+    const { type, amount, description, category, date, note } = req.body;
+    const updates = {};
+    if (type !== undefined) updates.type = type;
+    if (amount !== undefined) updates.amount = amount;
+    if (description !== undefined) updates.description = description;
+    if (category !== undefined) updates.category = category;
+    if (date !== undefined) updates.date = date;
+    if (note !== undefined) updates.note = note;
+    const { data, error } = await supabase.from('movements').update(updates).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ ok: true, movement: data });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar movimiento' }); }
+});
+
 app.delete('/api/movements/:id', async (req, res) => {
   try {
     const { error } = await supabase.from('movements').delete().eq('id', req.params.id);
