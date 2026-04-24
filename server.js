@@ -683,6 +683,18 @@ app.post('/api/travel-friends', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error' }); }
 });
 
+app.put('/api/travel-friends/:id', async (req, res) => {
+  try {
+    const { name, phone } = req.body;
+    const updates = {};
+    if (name !== undefined) updates.name = name;
+    if (phone !== undefined) updates.phone = phone;
+    const { data, error } = await supabase.from('travel_friends').update(updates).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ ok: true, friend: data });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar amigo' }); }
+});
+
 app.delete('/api/travel-friends/:id', async (req, res) => {
   try {
     await supabase.from('travel_friends').delete().eq('id', req.params.id);
