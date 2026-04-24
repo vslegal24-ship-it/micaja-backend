@@ -336,6 +336,81 @@ app.delete('/api/debt-contacts/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al eliminar contacto' }); }
 });
 
+// ══════ TASKS ══════
+app.get('/api/tasks/:userId', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('tasks').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ ok: true, tasks: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Error al obtener tareas' }); }
+});
+app.post('/api/tasks', async (req, res) => {
+  try {
+    const { user_id, titulo, prioridad, fecha, categoria, done } = req.body;
+    if (!user_id || !titulo) return res.status(400).json({ error: 'Campos requeridos' });
+    const { data, error } = await supabase.from('tasks').insert({ user_id, titulo, prioridad: prioridad||'media', fecha: fecha||null, categoria: categoria||null, done: done||false }).select().single();
+    if (error) throw error;
+    res.json({ ok: true, task: data });
+  } catch (err) { res.status(500).json({ error: 'Error al crear tarea' }); }
+});
+app.put('/api/tasks/:id', async (req, res) => {
+  try {
+    const { titulo, prioridad, fecha, categoria, done, completado } = req.body;
+    const u = {};
+    if (titulo !== undefined) u.titulo = titulo;
+    if (prioridad !== undefined) u.prioridad = prioridad;
+    if (fecha !== undefined) u.fecha = fecha || null;
+    if (categoria !== undefined) u.categoria = categoria || null;
+    if (done !== undefined) u.done = done;
+    if (completado !== undefined) u.completado = completado || null;
+    const { data, error } = await supabase.from('tasks').update(u).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ ok: true, task: data });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar tarea' }); }
+});
+app.delete('/api/tasks/:id', async (req, res) => {
+  try {
+    const { error } = await supabase.from('tasks').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error al eliminar tarea' }); }
+});
+
+// ══════ MERCADO ══════
+app.get('/api/mercado/:userId', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('mercado').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ ok: true, items: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Error al obtener lista' }); }
+});
+app.post('/api/mercado', async (req, res) => {
+  try {
+    const { user_id, nombre, cantidad, categoria, done } = req.body;
+    if (!user_id || !nombre) return res.status(400).json({ error: 'Campos requeridos' });
+    const { data, error } = await supabase.from('mercado').insert({ user_id, nombre, cantidad: cantidad||null, categoria: categoria||'Otros', done: done||false }).select().single();
+    if (error) throw error;
+    res.json({ ok: true, item: data });
+  } catch (err) { res.status(500).json({ error: 'Error al crear item' }); }
+});
+app.put('/api/mercado/:id', async (req, res) => {
+  try {
+    const { done } = req.body;
+    const u = {};
+    if (done !== undefined) u.done = done;
+    const { data, error } = await supabase.from('mercado').update(u).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ ok: true, item: data });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar item' }); }
+});
+app.delete('/api/mercado/:id', async (req, res) => {
+  try {
+    const { error } = await supabase.from('mercado').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error al eliminar item' }); }
+});
+
 
 
 app.post('/api/movements', async (req, res) => {
