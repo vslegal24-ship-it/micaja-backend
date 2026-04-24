@@ -1141,9 +1141,9 @@ app.get('/api/debts/:userId', async (req, res) => {
 
 app.post('/api/debts', async (req, res) => {
   try {
-    const { user_id, type, person_name, amount, description, due_date, note } = req.body;
+    const { user_id, type, person_name, amount, description, due_date, note, loan_date } = req.body;
     if (!user_id || !type || !person_name || !amount) return res.status(400).json({ error: 'Campos requeridos' });
-    const { data, error } = await supabase.from('debts').insert({ user_id, type, person_name, amount, description, due_date: due_date||null, note, status: 'pending', paid: 0 }).select().single();
+    const { data, error } = await supabase.from('debts').insert({ user_id, type, person_name, amount, description, due_date: due_date||null, note, loan_date: loan_date||null, status: 'pending', paid: 0 }).select().single();
     if (error) throw error;
     res.json({ ok: true, debt: data });
   } catch (err) { res.status(500).json({ error: 'Error al crear deuda' }); }
@@ -1164,13 +1164,14 @@ app.post('/api/debts/:id/abono', async (req, res) => {
 
 app.put('/api/debts/:id', async (req, res) => {
   try {
-    const { person_name, amount, description, due_date, note } = req.body;
+    const { person_name, amount, description, due_date, note, loan_date } = req.body;
     const updates = {};
     if (person_name !== undefined) updates.person_name = person_name;
     if (amount !== undefined) updates.amount = amount;
     if (description !== undefined) updates.description = description;
     if (due_date !== undefined) updates.due_date = due_date || null;
     if (note !== undefined) updates.note = note;
+    if (loan_date !== undefined) updates.loan_date = loan_date || null;
     const { data, error } = await supabase.from('debts').update(updates).eq('id', req.params.id).select().single();
     if (error) throw error;
     res.json({ ok: true, debt: data });
