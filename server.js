@@ -364,25 +364,36 @@ app.post('/api/upload-pdf', async (req, res) => {
   }
 });
 
-// Descargar archivo temporal
+// Descargar/Ver archivo temporal
 app.get('/api/download/:token', async (req, res) => {
   try {
     const { data, error } = await supabase.from('temp_files')
       .select('*').eq('token', req.params.token).single();
 
-    if (error || !data) return res.status(404).send('Archivo no encontrado o expirado');
+    if (error || !data) return res.status(404).send(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px;color:#64748B"><h2>Archivo no encontrado</h2><p>Este link no existe o ya fue eliminado.</p></body></html>`);
 
-    // Verificar expiración
     if (new Date(data.expires_at) < new Date()) {
       await supabase.from('temp_files').delete().eq('token', req.params.token);
-      return res.status(410).send('Este link ha expirado');
+      return res.status(410).send(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px;color:#64748B"><h2>Link expirado</h2><p>Este informe estuvo disponible por 24 horas.</p></body></html>`);
     }
 
+    // Inyectar barra de descarga PDF arriba del contenido
+    const toolbar = `<div style="position:fixed;top:0;left:0;right:0;background:#0F172A;color:#fff;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;z-index:9999;font-family:sans-serif;font-size:13px">
+      <span style="font-weight:700">📄 ${data.filename.replace('.html','')} · <span style="opacity:.6;font-weight:400">Informe MiCaja</span></span>
+      <div style="display:flex;gap:8px">
+        <button onclick="window.print()" style="padding:7px 16px;background:#25D366;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer;font-size:12px">⬇️ Guardar PDF</button>
+        <a href="https://milkomercios.in/MiCaja" style="padding:7px 16px;background:#334155;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer;font-size:12px;text-decoration:none">MiCaja</a>
+      </div>
+    </div>
+    <div style="height:46px"></div>
+    <style>@media print{div[style*="position:fixed"]{display:none!important}div[style*="height:46px"]{display:none!important}}</style>`;
+
+    // Insertar toolbar al inicio del body
+    const htmlWithToolbar = data.content.replace('<body>', '<body>' + toolbar);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="' + data.filename + '"');
-    res.send(data.content);
+    res.send(htmlWithToolbar);
   } catch (err) {
-    res.status(500).send('Error al descargar');
+    res.status(500).send('Error al cargar informe');
   }
 });
 
