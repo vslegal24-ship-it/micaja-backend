@@ -336,58 +336,53 @@ app.delete('/api/debt-contacts/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al eliminar contacto' }); }
 });
 
-// ══════ PDF UPLOAD PROXY ══════
+// ══════ PDF UPLOAD - ALMACENA EN SUPABASE ══════
 app.post('/api/upload-pdf', async (req, res) => {
   try {
     const { html, filename } = req.body;
     if (!html) return res.status(400).json({ error: 'HTML requerido' });
 
-    const https = require('https');
-    const boundary = '----MiCaja' + Date.now();
-    const fname = (filename || 'informe-micaja.html').replace(/[^a-zA-Z0-9.\-_]/g, '-');
-    const fileBuffer = Buffer.from(html, 'utf-8');
+    // Generar token único
+    const token = require('crypto').randomBytes(16).toString('hex');
+    const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24h
 
-    const bodyStart = Buffer.from(
-      '--' + boundary + '\r\n' +
-      'Content-Disposition: form-data; name="file"; filename="' + fname + '"\r\n' +
-      'Content-Type: text/html; charset=utf-8\r\n\r\n',
-      'utf-8'
-    );
-    const bodyEnd = Buffer.from('\r\n--' + boundary + '--\r\n', 'utf-8');
-    const body = Buffer.concat([bodyStart, fileBuffer, bodyEnd]);
+    // Guardar en tabla temp_files de Supabase
+    const { data, error } = await supabase.from('temp_files').insert({
+      token,
+      content: html,
+      filename: filename || 'informe-micaja.html',
+      expires_at: expires
+    }).select().single();
 
-    // Usar transfer.sh — más confiable, devuelve URL directa
-    const options = {
-      hostname: 'transfer.sh',
-      path: '/' + fname,
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'text/html',
-        'Content-Length': fileBuffer.length,
-        'Max-Days': '1',
-        'Max-Downloads': '10'
-      }
-    };
+    if (error) throw error;
 
-    const link = await new Promise((resolve, reject) => {
-      const request = https.request(options, (response) => {
-        let data = '';
-        response.on('data', chunk => data += chunk);
-        response.on('end', () => {
-          const url = data.trim();
-          if(url.startsWith('http')) resolve(url);
-          else reject(new Error('URL invalida: ' + url.substring(0,80)));
-        });
-      });
-      request.on('error', reject);
-      request.write(fileBuffer);
-      request.end();
-    });
-
-    res.json({ ok: true, link: link });
+    const link = `https://micaja-backend-production.up.railway.app/api/download/${token}`;
+    res.json({ ok: true, link });
   } catch (err) {
     console.error('Upload PDF error:', err.message);
-    res.status(500).json({ error: err.message || 'Error al subir PDF' });
+    res.status(500).json({ error: err.message || 'Error al guardar informe' });
+  }
+});
+
+// Descargar archivo temporal
+app.get('/api/download/:token', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('temp_files')
+      .select('*').eq('token', req.params.token).single();
+
+    if (error || !data) return res.status(404).send('Archivo no encontrado o expirado');
+
+    // Verificar expiración
+    if (new Date(data.expires_at) < new Date()) {
+      await supabase.from('temp_files').delete().eq('token', req.params.token);
+      return res.status(410).send('Este link ha expirado');
+    }
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + data.filename + '"');
+    res.send(data.content);
+  } catch (err) {
+    res.status(500).send('Error al descargar');
   }
 });
 
