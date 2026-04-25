@@ -341,19 +341,53 @@ app.post('/api/upload-pdf', async (req, res) => {
   try {
     const { html, filename } = req.body;
     if (!html) return res.status(400).json({ error: 'HTML requerido' });
-    // Subir a file.io como texto HTML
-    const FormData = require('form-data');
-    const form = new FormData();
-    const buffer = Buffer.from(html, 'utf-8');
-    form.append('file', buffer, { filename: filename || 'informe-micaja.html', contentType: 'text/html' });
-    const fetch = require('node-fetch');
-    const r = await fetch('https://file.io/?expires=1d', { method: 'POST', body: form });
-    const d = await r.json();
-    if (!d.success) return res.status(500).json({ error: 'Error al subir archivo' });
-    res.json({ ok: true, link: d.link });
+
+    const https = require('https');
+    const boundary = '----MiCajaBoundary' + Date.now();
+    const fname = (filename || 'informe-micaja.html').replace(/[^a-zA-Z0-9.\-_]/g, '-');
+    const fileBuffer = Buffer.from(html, 'utf-8');
+
+    const bodyParts = [
+      '--' + boundary + '\r\n',
+      'Content-Disposition: form-data; name="file"; filename="' + fname + '"\r\n',
+      'Content-Type: text/html\r\n\r\n'
+    ];
+    const bodyStart = Buffer.from(bodyParts.join(''), 'utf-8');
+    const bodyEnd = Buffer.from('\r\n--' + boundary + '--\r\n', 'utf-8');
+    const body = Buffer.concat([bodyStart, fileBuffer, bodyEnd]);
+
+    const options = {
+      hostname: 'file.io',
+      path: '/?expires=1d',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'multipart/form-data; boundary=' + boundary,
+        'Content-Length': body.length
+      }
+    };
+
+    const result = await new Promise((resolve, reject) => {
+      const request = https.request(options, (response) => {
+        let data = '';
+        response.on('data', chunk => data += chunk);
+        response.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch(e) { reject(new Error('Respuesta invalida: ' + data.substring(0,100))); }
+        });
+      });
+      request.on('error', reject);
+      request.write(body);
+      request.end();
+    });
+
+    if (!result.success) {
+      console.error('file.io error:', result);
+      return res.status(500).json({ error: 'Error al subir: ' + (result.message || 'intenta de nuevo') });
+    }
+    res.json({ ok: true, link: result.link });
   } catch (err) {
-    console.error('Upload PDF error:', err);
-    res.status(500).json({ error: 'Error al subir PDF' });
+    console.error('Upload PDF error:', err.message);
+    res.status(500).json({ error: err.message || 'Error al subir PDF' });
   }
 });
 
