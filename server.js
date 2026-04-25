@@ -336,7 +336,28 @@ app.delete('/api/debt-contacts/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al eliminar contacto' }); }
 });
 
-// ══════ TASKS ══════
+// ══════ PDF UPLOAD PROXY ══════
+app.post('/api/upload-pdf', async (req, res) => {
+  try {
+    const { html, filename } = req.body;
+    if (!html) return res.status(400).json({ error: 'HTML requerido' });
+    // Subir a file.io como texto HTML
+    const FormData = require('form-data');
+    const form = new FormData();
+    const buffer = Buffer.from(html, 'utf-8');
+    form.append('file', buffer, { filename: filename || 'informe-micaja.html', contentType: 'text/html' });
+    const fetch = require('node-fetch');
+    const r = await fetch('https://file.io/?expires=1d', { method: 'POST', body: form });
+    const d = await r.json();
+    if (!d.success) return res.status(500).json({ error: 'Error al subir archivo' });
+    res.json({ ok: true, link: d.link });
+  } catch (err) {
+    console.error('Upload PDF error:', err);
+    res.status(500).json({ error: 'Error al subir PDF' });
+  }
+});
+
+
 app.get('/api/tasks/:userId', async (req, res) => {
   try {
     const { data, error } = await supabase.from('tasks').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
