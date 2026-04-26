@@ -398,6 +398,46 @@ app.get('/api/download/:token', async (req, res) => {
 });
 
 
+// ══════ SERVICIOS ══════
+app.get('/api/servicios/:userId', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('servicios').select('*').eq('user_id', req.params.userId).order('dia');
+    if (error) throw error;
+    res.json({ ok: true, servicios: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Error al obtener servicios' }); }
+});
+app.post('/api/servicios', async (req, res) => {
+  try {
+    const { user_id, nombre, icono, dia, color, wa, pagado_mes } = req.body;
+    if (!user_id || !nombre || !dia) return res.status(400).json({ error: 'Campos requeridos: user_id='+user_id+' nombre='+nombre+' dia='+dia });
+    const { data, error } = await supabase.from('servicios').insert({ user_id, nombre, icono: icono||'🔔', dia: parseInt(dia), color: color||'#EFF6FF', wa: wa||null, pagado_mes: pagado_mes||false }).select().single();
+    if (error) { console.error('Servicios insert error:', error); return res.status(500).json({ error: error.message }); }
+    res.json({ ok: true, servicio: data });
+  } catch (err) { console.error('Servicios catch:', err.message); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/servicios/:id', async (req, res) => {
+  try {
+    const { nombre, icono, dia, color, wa, pagado_mes } = req.body;
+    const u = {};
+    if (nombre !== undefined) u.nombre = nombre;
+    if (icono !== undefined) u.icono = icono;
+    if (dia !== undefined) u.dia = parseInt(dia);
+    if (color !== undefined) u.color = color;
+    if (wa !== undefined) u.wa = wa || null;
+    if (pagado_mes !== undefined) u.pagado_mes = pagado_mes;
+    const { data, error } = await supabase.from('servicios').update(u).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ ok: true, servicio: data });
+  } catch (err) { res.status(500).json({ error: 'Error al actualizar servicio' }); }
+});
+app.delete('/api/servicios/:id', async (req, res) => {
+  try {
+    const { error } = await supabase.from('servicios').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Error al eliminar servicio' }); }
+});
+
 app.get('/api/tasks/:userId', async (req, res) => {
   try {
     const { data, error } = await supabase.from('tasks').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false });
