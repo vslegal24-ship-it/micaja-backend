@@ -1,6 +1,11 @@
 // ══════════════════════════════════════
-// MiCaja Backend — server.js v2
-// API REST + WhatsApp Webhook
+// MiCaja Backend — server.js v2.2
+// FIX: sistema de sesiones WhatsApp
+// Cambios vs v2.1:
+//   - setCtx ya NO hace merge con ctx viejo (era el bug principal)
+//   - clearCtx usa setCtxByPhone para consistencia
+//   - flujo menu usa setCtxByPhone directamente
+//   - processWhatsAppMessage relee ctx fresco después de clearCtx
 // ══════════════════════════════════════
 
 const express = require('express');
@@ -25,21 +30,17 @@ const BOLD_SECRET_KEY = process.env.BOLD_SECRET_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ══════════════════════════════════════
-// FASE 1.1 — RATE LIMITING
-// Protege contra bots y abuso sin afectar usuarios normales
-// Límites generosos: nadie legítimo los alcanza
+// RATE LIMITING
 // ══════════════════════════════════════
-const rateLimitStore = new Map(); // { key: { count, resetAt } }
+const rateLimitStore = new Map();
 
 function rateLimit(maxPerMinute, maxPerHour) {
   return (req, res, next) => {
-    // Identificar por IP + teléfono si viene en el body
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip || 'unknown';
     const phone = req.body?.phone || req.params?.phone || '';
     const key = phone ? `${ip}:${phone}` : ip;
     const now = Date.now();
 
-    // Limpiar entradas viejas cada 1000 requests
     if (rateLimitStore.size > 1000) {
       for (const [k, v] of rateLimitStore) {
         if (v.hourResetAt < now) rateLimitStore.delete(k);
@@ -51,7 +52,6 @@ function rateLimit(maxPerMinute, maxPerHour) {
       hourCount: 0, hourResetAt: now + 3600000
     };
 
-    // Reset contadores si expiró la ventana
     if (entry.minResetAt < now) { entry.minCount = 0; entry.minResetAt = now + 60000; }
     if (entry.hourResetAt < now) { entry.hourCount = 0; entry.hourResetAt = now + 3600000; }
 
@@ -71,8 +71,7 @@ function rateLimit(maxPerMinute, maxPerHour) {
   };
 }
 
-// Rate limit para WhatsApp — más estricto para evitar spam del bot
-const waMessageStore = new Map(); // { phone: { count, resetAt } }
+const waMessageStore = new Map();
 
 function rateLimitWA(phone, maxPerDay = 150, maxPerMinute = 15) {
   const now = Date.now();
@@ -92,10 +91,9 @@ function rateLimitWA(phone, maxPerDay = 150, maxPerMinute = 15) {
 
 // ══════ HEALTH CHECK ══════
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'MiCaja Backend', version: '2.1.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'MiCaja Backend', version: '2.2.0', timestamp: new Date().toISOString() });
 });
 
-// Función para normalizar teléfono colombiano — siempre 57XXXXXXXXXX
 function normalizePhone(phone) {
   let p = phone.replace(/[\s\-\+\(\)]/g, '');
   if (p.startsWith('57') && p.length === 12) return p;
@@ -105,7 +103,6 @@ function normalizePhone(phone) {
 }
 
 // ══════ AUTH ══════
-// Registro web: poco usado (registro real es por WA), límite generoso
 app.post('/api/auth/register', rateLimit(3, 10), async (req, res) => {
   try {
     const { phone: rawPhone, name, pin, plan, partner_phone, partner_name, business_name } = req.body;
@@ -153,8 +150,7 @@ app.post('/api/auth/verify', rateLimit(10, 30), async (req, res) => {
   }
 });
 
-// Contador de intentos fallidos en memoria (se limpia si Railway reinicia — aceptable)
-const loginAttempts = new Map(); // { phone: { count, lockedUntil } }
+const loginAttempts = new Map();
 
 app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
   try {
@@ -162,7 +158,6 @@ app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
     if (!rawPhone || !pin) return res.status(400).json({ error: 'Teléfono y PIN requeridos' });
     const phone = normalizePhone(rawPhone);
 
-    // Verificar si está bloqueado
     const attempts = loginAttempts.get(phone) || { count: 0, lockedUntil: 0 };
     const now = Date.now();
 
@@ -174,27 +169,21 @@ app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
       });
     }
 
-    // Buscar usuario SIN el PIN primero (para saber si existe)
     const { data: userExists } = await supabase.from('users').select('id, status').eq('phone', phone).single();
 
     if (!userExists) {
-      // Teléfono no existe — no revelar si es el PIN o el número el incorrecto
       return res.status(401).json({ error: 'Número o PIN incorrecto' });
     }
 
-    // Verificar PIN
     const { data: user, error } = await supabase.from('users').select('*').eq('phone', phone).eq('pin', pin).single();
 
     if (error || !user) {
-      // PIN incorrecto — incrementar contador
       attempts.count += 1;
 
-      // Delay progresivo: 1s, 2s, 4s, 8s, bloqueo
       const delays = [0, 1000, 2000, 4000, 8000];
       const delayMs = delays[Math.min(attempts.count - 1, delays.length - 1)];
 
       if (attempts.count >= 5) {
-        // Bloqueo de 15 minutos
         attempts.lockedUntil = now + 15 * 60 * 1000;
         attempts.count = 0;
         loginAttempts.set(phone, attempts);
@@ -207,7 +196,6 @@ app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
 
       loginAttempts.set(phone, attempts);
 
-      // Aplicar delay antes de responder
       if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
 
       const intentosRestantes = 5 - attempts.count;
@@ -217,13 +205,11 @@ app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
       });
     }
 
-    // Login exitoso — limpiar contador de intentos
     loginAttempts.delete(phone);
 
     if (user.status === 'pending') return res.status(403).json({ error: 'Cuenta pendiente de verificación. Revisa tu WhatsApp.' });
     if (user.status === 'inactive') return res.status(403).json({ error: 'Cuenta inactiva. Contacta soporte.' });
 
-    // Notificación de seguridad por WhatsApp
     const hora = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' });
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'desconocida';
     sendWhatsApp(phone,
@@ -232,15 +218,13 @@ app.post('/api/auth/login', rateLimit(10, 30), async (req, res) => {
       `📅 ${hora}\n` +
       `🌐 IP: ${ip}\n\n` +
       `_Si no fuiste tú, cambia tu PIN ahora:\nEscríbeme "cambiar pin 1234" (pon tus 4 dígitos)_`
-    ).catch(() => {}); // No bloquear el login si falla el WA
+    ).catch(() => {});
 
     const { pin: _, verify_code: __, ...safeUser } = user;
     res.json({ ok: true, user: safeUser });
   } catch (err) { res.status(500).json({ error: 'Error al ingresar' }); }
 });
 
-// ══════ MAGIC TOKEN LOGIN (desde WhatsApp) ══════
-// El usuario escribe "web" al bot, recibe link con token de un solo uso
 app.post('/api/auth/magic', async (req, res) => {
   try {
     const { token } = req.body;
@@ -257,7 +241,6 @@ app.post('/api/auth/magic', async (req, res) => {
       return res.status(401).json({ error: 'Link expirado. Escribe "web" al bot para obtener uno nuevo.' });
     }
 
-    // Invalidar token — un solo uso
     await supabase.from('users').update({
       magic_token: null,
       magic_token_expiry: null
@@ -287,7 +270,6 @@ app.get('/api/movements/:userId', async (req, res) => {
     const { module, period } = req.query;
     let query = supabase.from('movements').select('*').eq('user_id', req.params.userId).order('date', { ascending: false }).limit(500);
     if (module) query = query.eq('module', module);
-    // Solo filtrar por period_id si se pide explícitamente
     if (period) query = query.eq('period_id', period);
     const { data, error } = await query;
     if (error) throw error;
@@ -336,17 +318,15 @@ app.delete('/api/debt-contacts/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error al eliminar contacto' }); }
 });
 
-// ══════ PDF UPLOAD - ALMACENA EN SUPABASE ══════
+// ══════ PDF UPLOAD ══════
 app.post('/api/upload-pdf', async (req, res) => {
   try {
     const { html, filename } = req.body;
     if (!html) return res.status(400).json({ error: 'HTML requerido' });
 
-    // Generar token único
-    const token = require('crypto').randomBytes(16).toString('hex');
-    const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24h
+    const token = crypto.randomBytes(16).toString('hex');
+    const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-    // Guardar en tabla temp_files de Supabase
     const { data, error } = await supabase.from('temp_files').insert({
       token,
       content: html,
@@ -364,7 +344,6 @@ app.post('/api/upload-pdf', async (req, res) => {
   }
 });
 
-// Descargar/Ver archivo temporal
 app.get('/api/download/:token', async (req, res) => {
   try {
     const { data, error } = await supabase.from('temp_files')
@@ -377,7 +356,6 @@ app.get('/api/download/:token', async (req, res) => {
       return res.status(410).send(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px;color:#64748B"><h2>Link expirado</h2><p>Este informe estuvo disponible por 24 horas.</p></body></html>`);
     }
 
-    // Inyectar barra de descarga PDF arriba del contenido
     const toolbar = `<div style="position:fixed;top:0;left:0;right:0;background:#0F172A;color:#fff;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;z-index:9999;font-family:sans-serif;font-size:13px">
       <span style="font-weight:700">📄 ${data.filename.replace('.html','')} · <span style="opacity:.6;font-weight:400">Informe MiCaja</span></span>
       <div style="display:flex;gap:8px">
@@ -388,7 +366,6 @@ app.get('/api/download/:token', async (req, res) => {
     <div style="height:46px"></div>
     <style>@media print{div[style*="position:fixed"]{display:none!important}div[style*="height:46px"]{display:none!important}}</style>`;
 
-    // Insertar toolbar al inicio del body
     const htmlWithToolbar = data.content.replace('<body>', '<body>' + toolbar);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(htmlWithToolbar);
@@ -396,7 +373,6 @@ app.get('/api/download/:token', async (req, res) => {
     res.status(500).send('Error al cargar informe');
   }
 });
-
 
 // ══════ SERVICIOS ══════
 app.get('/api/servicios/:userId', async (req, res) => {
@@ -511,8 +487,6 @@ app.delete('/api/mercado/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: 'Error al eliminar item' }); }
 });
-
-
 
 app.post('/api/movements', async (req, res) => {
   try {
@@ -955,7 +929,6 @@ app.post('/webhook', async (req, res) => {
     const msg = messages[0];
     const from = msg.from;
 
-    // Rate limit WhatsApp — evita loops y spam
     const waLimit = rateLimitWA(from);
     if (waLimit.blocked) {
       console.warn(`⚠️ WA rate limit (${waLimit.reason}): ${from}`);
@@ -980,25 +953,47 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ══════════════════════════════════════
+// FUNCIÓN GLOBAL DE SESIÓN — única fuente de verdad
+// FIX v2.2: siempre upsert por phone, nunca merge con estado viejo
+// ══════════════════════════════════════
+async function setCtxByPhone(phone, newCtx) {
+  // IMPORTANTE: siempre sobrescribe — nunca mezcla con contexto anterior
+  await supabase.from('wa_sessions').upsert(
+    {
+      phone,
+      context: JSON.stringify(newCtx),
+      last_message: null,
+      updated_at: new Date().toISOString()
+    },
+    { onConflict: 'phone' }
+  );
+}
+
+async function getCtxByPhone(phone) {
+  const { data: session } = await supabase.from('wa_sessions').select('context').eq('phone', phone).single();
+  if (!session || !session.context) return {};
+  try { return JSON.parse(session.context); } catch { return {}; }
+}
+
+// ══════════════════════════════════════
 // PROCESAR MENSAJES DE WHATSAPP
 // ══════════════════════════════════════
 async function processWhatsAppMessage(phone, text) {
   let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
-  // Normalizar: minúsculas + quitar tildes/acentos para no requerir tilde en comandos
+
   const lower = text.toLowerCase().trim()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[¿¡]/g, '');
-  let { data: session } = await supabase.from('wa_sessions').select('*').eq('phone', phone).single();
-  const ctx = session?.context ? JSON.parse(session.context) : {};
 
-  async function setCtx(newCtx) {
-    const merged = { ...ctx, ...newCtx };
-    if (session) { await supabase.from('wa_sessions').update({ context: JSON.stringify(merged), last_message: text, updated_at: new Date() }).eq('id', session.id); }
-    else { await supabase.from('wa_sessions').insert({ phone, context: JSON.stringify(merged), last_message: text }); session = { id: 'new' }; }
-    return merged;
-  }
-  async function clearCtx() { if (session) await supabase.from('wa_sessions').update({ context: '{}' }).eq('id', session.id); }
+  // ── Leer contexto fresco desde DB ──
+  // FIX: siempre leer directo de DB, no usar variable local que puede quedar desincronizada
+  const ctx = await getCtxByPhone(phone);
 
+  // Helpers locales que usan la función global
+  const setCtx = (newCtx) => setCtxByPhone(phone, newCtx);
+  const clearCtx = () => setCtxByPhone(phone, {});
+
+  // ══════ REGISTRO SI NO TIENE CUENTA ══════
   if (!user && ['registrar','registro','registrarme','empezar','comenzar','crear cuenta','nueva cuenta','quiero registrarme'].includes(lower)) {
     await setCtx({ step: 'register_plan' });
     await sendWhatsApp(phone, `🎉 ¡Bienvenido a *MiCaja*!\n\n¿Para qué quieres usarla?\n\n*1.* 👤 Personal\n*2.* 💑 Pareja\n*3.* ✈️ Viajes\n*4.* 🏪 Negocio\n\nResponde con el número`);
@@ -1029,6 +1024,62 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
+  // ══════ COMANDOS GLOBALES — siempre funcionan, limpian contexto primero ══════
+  // FIX: estos comandos van ANTES de cualquier evaluación de ctx.step
+  const esReset = ['cancelar','cancel','reset','reiniciar','limpiar','salir','exit'].includes(lower);
+  if (esReset) {
+    await clearCtx();
+    await sendWhatsApp(phone, `✅ Listo, contexto limpiado.\n\nEscribe *hola* o *menu* para empezar 😊`);
+    return;
+  }
+
+  // ══════ SALUDO — limpia contexto y muestra balance ══════
+  if (['hola','hi','hey','buenas','buenos dias','buenas tardes','buenas noches','que mas','inicio','start'].includes(lower)) {
+    await clearCtx();
+    const hour = new Date(new Date().toLocaleString('en-US',{timeZone:'America/Bogota'})).getHours();
+    const saludo = hour < 12 ? 'Buenos dias' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
+    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+    const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', user.plan);
+    const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
+    await sendWhatsApp(phone,
+      `${saludo} *${user.name||''}* 👋\n\n` +
+      `Modulo activo: *${planNames[user.plan]}*\n` +
+      `${movs&&movs.length ? `Balance: *$${bal.toLocaleString()}* COP\n` : ''}\n` +
+      `Escribe *menu* para ver todas las opciones\n` +
+      `O registra directamente:\n` +
+      `💸 _"pague luz 80mil"_\n` +
+      `💵 _"me ingresaron 2 millones"_`
+    );
+    return;
+  }
+
+  // ══════ MENÚ PRINCIPAL ══════
+  // FIX: detectar "menu" SIN depender del ctx anterior — siempre funciona
+  const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver','volver al menu','0'].includes(lower);
+  if (esMenu) {
+    await clearCtx();
+    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+    await sendWhatsApp(phone,
+      `🤖 *MiCaja — Menu principal*\n` +
+      `Modulo activo: *${planNames[user.plan]}*\n\n` +
+      `*1* 💰 Finanzas personales\n` +
+      `*2* 🏪 Mi negocio\n` +
+      `*3* 💑 Pareja\n` +
+      `*4* ✈️ Viajes\n` +
+      `*5* 💸 Deudas\n` +
+      `*6* 💳 Metodos de pago\n` +
+      `*7* 🛒 Lista de mercado\n` +
+      `*8* ✅ Tareas\n` +
+      `*9* 🔔 Servicios y pagos\n` +
+      `*10* 📊 Informes\n\n` +
+      `Escribe el numero o el nombre del modulo`
+    );
+    // FIX: setCtx DESPUÉS de enviar el mensaje, con contexto limpio
+    await setCtx({ step: 'menu_principal' });
+    return;
+  }
+
+  // ══════ PIN ══════
   const pinConsulta = /^(mi\s+)?pin$|^(cuál|cual)\s+es\s+mi\s+pin|^(olvidé|olvide|recuperar|recordar|ver)\s+(mi\s+)?pin|^pin\?$/i;
   if (pinConsulta.test(lower)) {
     await sendWhatsApp(phone, `🔐 Tu PIN es: *${user.pin}*\n\nPara cambiarlo: _"cambiar pin 1234"_`);
@@ -1040,6 +1091,7 @@ async function processWhatsAppMessage(phone, text) {
     await sendWhatsApp(phone, `✅ PIN cambiado a *${pinCambio[1]}* 🔒`);
     return;
   }
+
   // ══════ MÓDULO — consultar y cambiar ══════
   const esConsultaModulo = /^(mi\s+)?modulo(\s+actual|\s+activo)?$|^en\s+que\s+modulo|^que\s+modulo|^modulos\s+disponibles?|^ver\s+modulos?|^mis\s+modulos?/i.test(lower);
   if (esConsultaModulo) {
@@ -1194,7 +1246,7 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ MÉTODOS DE PAGO (Nequi, Bancolombia, etc) ══════
+  // ══════ MÉTODOS DE PAGO ══════
   if (/mi\s+nequi|mi\s+bancol|mi\s+daviplata|mi\s+banco|mis\s+datos?\s+(?:de\s+)?pago|mis\s+llaves?|como\s+me\s+pagan|datos?\s+(?:para\s+)?transferencia|mi\s+cuenta|mi\s+numero\s+(?:de\s+)?cuenta|mis\s+metodos?\s+(?:de\s+)?pago/i.test(lower)) {
     const {data:cfg} = await supabase.from('user_configs').select('*').eq('user_id',user.id).single();
     const nequi = cfg?.nequi;
@@ -1246,60 +1298,8 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ SALUDO / INICIO ══════
-  if (['hola','hi','hey','buenas','buenos dias','buenas tardes','buenas noches','que mas','inicio','start'].includes(lower)) {
-    await clearCtx(); // Siempre limpiar contexto al saludar
-    const hour = new Date(new Date().toLocaleString('en-US',{timeZone:'America/Bogota'})).getHours();
-    const saludo = hour < 12 ? 'Buenos dias' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
-    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-    const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', user.plan);
-    const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
-    await sendWhatsApp(phone,
-      `${saludo} *${user.name||''}* 👋\n\n` +
-      `Modulo activo: *${planNames[user.plan]}*\n` +
-      `${movs&&movs.length ? `Balance: *$${bal.toLocaleString()}* COP\n` : ''}\n` +
-      `Escribe *menu* para ver todas las opciones\n` +
-      `O registra directamente:\n` +
-      `💸 _"pague luz 80mil"_\n` +
-      `💵 _"me ingresaron 2 millones"_`
-    );
-    return;
-  }
-
-  // ══════ COMANDOS GLOBALES — siempre funcionan sin importar el contexto ══════
-  if (['cancelar','cancel','reset','reiniciar','limpiar','salir','exit'].includes(lower)) {
-    await clearCtx();
-    await sendWhatsApp(phone, `✅ Listo, contexto limpiado.\n\nEscribe *hola* o *menu* para empezar 😊`);
-    return;
-  }
-
-  // ══════ MENÚ PRINCIPAL NAVEGABLE ══════
-  const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver','volver al menu','0'].includes(lower);
-  if (esMenu) {
-    await clearCtx();
-    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-    await sendWhatsApp(phone,
-      `🤖 *MiCaja — Menu principal*\n` +
-      `Modulo activo: *${planNames[user.plan]}*\n\n` +
-      `*1* 💰 Finanzas personales\n` +
-      `*2* 🏪 Mi negocio\n` +
-      `*3* 💑 Pareja\n` +
-      `*4* ✈️ Viajes\n` +
-      `*5* 💸 Deudas\n` +
-      `*6* 💳 Metodos de pago\n` +
-      `*7* 🛒 Lista de mercado\n` +
-      `*8* ✅ Tareas\n` +
-      `*9* 🔔 Servicios y pagos\n` +
-      `*10* 📊 Informes\n\n` +
-      `Escribe el numero o el nombre del modulo`
-    );
-    await setCtx({step:'menu_principal'});
-    return;
-  }
-
   // ══════ NAVEGACION DESDE MENU PRINCIPAL ══════
   if (ctx.step === 'menu_principal') {
-    const opcion = lower;
     const menuMap = {
       '1':'personal','finanzas':'personal','finanzas personales':'personal','mis finanzas':'personal',
       '2':'negocio','negocio':'negocio','mi negocio':'negocio','comerciantes':'negocio',
@@ -1312,9 +1312,8 @@ async function processWhatsAppMessage(phone, text) {
       '9':'servicios','servicios':'servicios','mis servicios':'servicios','servicios publicos':'servicios',
       '10':'informes','informes':'informes','informe':'informes','reportes':'informes'
     };
-    const dest = menuMap[opcion];
+    const dest = menuMap[lower];
     if (dest) {
-      await clearCtx();
       await mostrarSubmenu(phone, dest, user);
     } else {
       await sendWhatsApp(phone, `Elige una opcion del *1* al *10* o escribe el nombre del modulo\n\nEscribe *menu* para ver las opciones`);
@@ -1323,19 +1322,15 @@ async function processWhatsAppMessage(phone, text) {
   }
 
   // ══════ SUBMENUS DIRECTOS (sin estar en menu_principal) ══════
-  // Mercado directo
   if (/^mercado$|^mi mercado$|^lista mercado$|^lista de mercado$|^mis compras?$/.test(lower)) {
     await mostrarSubmenu(phone, 'mercado', user); return;
   }
-  // Tareas directo
   if (/^tareas?$|^mis tareas?$|^pendientes?$|^mis pendientes?$|^lista tareas?$/.test(lower)) {
     await mostrarSubmenu(phone, 'tareas', user); return;
   }
-  // Servicios directo
   if (/^servicios?$|^mis servicios?$|^servicios? publicos?$|^vencimientos?$/.test(lower)) {
     await mostrarSubmenu(phone, 'servicios', user); return;
   }
-  // Modulo directo
   if (/^modulos?$|^mi modulo$|^modulo actual$|^en que modulo estoy$|^que modulo tengo$/.test(lower)) {
     await mostrarSubmenu(phone, 'modulo', user); return;
   }
@@ -1343,7 +1338,6 @@ async function processWhatsAppMessage(phone, text) {
   // ══════ NAVEGACION DENTRO DE SUBMENÚ ══════
   if (ctx.step && ctx.step.startsWith('sub_')) {
     const submenuActual = ctx.step.replace('sub_','');
-    // 0 o "volver" = regresa al menu
     if (['0','volver','atras','menu','salir','back'].includes(lower)) {
       await clearCtx();
       const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
@@ -1362,15 +1356,14 @@ async function processWhatsAppMessage(phone, text) {
         `*10* 📊 Informes\n\n` +
         `Escribe el numero o el nombre del modulo`
       );
-      await setCtx({step:'menu_principal'});
+      await setCtx({ step: 'menu_principal' });
       return;
     }
-    // Manejar opciones dentro del submenu
     await manejarSubmenu(phone, submenuActual, lower, user, ctx);
     return;
   }
 
-  // ══════ INFORME CON PDF LINK ══════
+  // ══════ INFORME / PDF ══════
   if (['informe','pdf','reporte','informe del mes','mi informe','ver informe'].includes(lower) || /informe\s*(del\s*)?(mes|semana|año|ano|todo)/i.test(lower)) {
     const module = user.plan || 'personal';
     const planNames = {personal:'Finanzas Personales',parejas:'Finanzas en Pareja',viajes:'Viajes',comerciantes:'Mi Negocio'};
@@ -1382,10 +1375,8 @@ async function processWhatsAppMessage(phone, text) {
     (movs||[]).filter(m=>m.type==='expense').forEach(m=>{byCat[m.category]=(byCat[m.category]||0)+Number(m.amount);});
     const topCats = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,v])=>`  • ${c}: $${v.toLocaleString()}`).join('\n');
     try {
-      // Usar función unificada — mismo diseño que la web
       const fecha = new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
       const html = generarHTMLInforme(movs||[], planNames[module], fecha, user.name);
-      const crypto = require('crypto');
       const token = crypto.randomBytes(16).toString('hex');
       await supabase.from('temp_files').insert({token, content: html, filename:`informe-${module}.html`, expires_at: new Date(Date.now()+24*60*60*1000).toISOString()});
       const link = `https://micaja-backend-production.up.railway.app/api/download/${token}`;
@@ -1405,6 +1396,8 @@ async function processWhatsAppMessage(phone, text) {
     }
     return;
   }
+
+  // ══════ RESUMEN / BALANCE ══════
   if (['resumen','cuánto llevo','cuanto llevo','balance','cómo voy','como voy','estado','saldo'].includes(lower)) {
     const module = user.plan || 'personal';
     const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', module);
@@ -1419,6 +1412,8 @@ async function processWhatsAppMessage(phone, text) {
     await sendWhatsApp(phone, `📊 *Resumen de ${user.name||'tu cuenta'}*\n\n💵 Ingresos: *$${inc.toLocaleString()}*\n💸 Gastos: *$${exp.toLocaleString()}*\n${bal>=0?'✅':'⚠️'} Balance: *$${bal.toLocaleString()}*\n📋 ${(movs||[]).length} movimientos\n\n${topCats?`📂 *Top gastos:*\n${topCats}\n\n`:''}🕐 *Recientes:*\n${last3}\n\n${inc>0?`Ahorrando el *${Math.round((bal/inc)*100)}%* 👏`:''}`);
     return;
   }
+
+  // ══════ DEUDAS RÁPIDAS ══════
   if (['mis deudas','deudas','qué debo','que debo','cuánto debo','cuanto debo','me deben'].includes(lower)) {
     try {
       const { data: debts } = await supabase.from('debts').select('*').eq('user_id', user.id).eq('status', 'pending').or('status.eq.partial');
@@ -1434,6 +1429,8 @@ async function processWhatsAppMessage(phone, text) {
     } catch(e) { await sendWhatsApp(phone, `🌐 Ver deudas: milkomercios.in/MiCaja/deudas.html`); }
     return;
   }
+
+  // ══════ REGISTRAR DEUDAS RÁPIDAS ══════
   const deboMatch = lower.match(/(?:le debo|debo)\s+(\d+[\d.,]*\s*(?:mil|k|m)?)\s+(?:a|le a)?\s*(.+)/i);
   const meDebenMatch = lower.match(/(.+)\s+me debe\s+(\d+[\d.,]*\s*(?:mil|k|m)?)/i);
   if (deboMatch) {
@@ -1450,13 +1447,13 @@ async function processWhatsAppMessage(phone, text) {
     await sendWhatsApp(phone, `💵 *${persona}* te debe *$${amount.toLocaleString()}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
     return;
   }
+
+  // ══════ LINK WEB ══════
   const webCmds = ['web','link','portal','dashboard','login','entrar','ingresar','acceder','mi cuenta','acceso web','entrar a la web'];
   if (webCmds.includes(lower) || webCmds.some(c => lower.includes(c))) {
     try {
-      // Generar token mágico de un solo uso — expira en 10 minutos
       const magicToken = crypto.randomBytes(20).toString('hex');
       const expiresAt = Date.now() + 10 * 60 * 1000;
-      // Guardar en users temporalmente
       await supabase.from('users').update({
         magic_token: magicToken,
         magic_token_expiry: expiresAt
@@ -1473,6 +1470,8 @@ async function processWhatsAppMessage(phone, text) {
     }
     return;
   }
+
+  // ══════ PAGAR SUSCRIPCIÓN ══════
   if (['pagar','suscripción','suscripcion','renovar','activar'].includes(lower)) {
     try {
       const linkRes = await axios.get(`https://micaja-backend-production.up.railway.app/api/payments/link/${phone}`);
@@ -1480,6 +1479,8 @@ async function processWhatsAppMessage(phone, text) {
     } catch(e) { await sendWhatsApp(phone, `💳 Pagar: milkomercios.in/MiCaja/dashboard.html`); }
     return;
   }
+
+  // ══════ BORRAR ÚLTIMO ══════
   if (['borrar último','borrar ultimo','borrar','deshacer'].includes(lower)) {
     const { data: last } = await supabase.from('movements').select('id,description,amount,type,category').eq('user_id', user.id).eq('module', user.plan).order('created_at',{ascending:false}).limit(1).single();
     if (last) {
@@ -1488,6 +1489,8 @@ async function processWhatsAppMessage(phone, text) {
     } else { await sendWhatsApp(phone, `No tienes movimientos para borrar 📭`); }
     return;
   }
+
+  // ══════ VER ÚLTIMOS MOVIMIENTOS ══════
   if (['últimos','ultimos','mis movimientos','ver movimientos'].includes(lower)) {
     const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', user.plan).order('created_at',{ascending:false}).limit(5);
     if (!movs || !movs.length) { await sendWhatsApp(phone, `No tienes movimientos aún 📭`); return; }
@@ -1495,6 +1498,8 @@ async function processWhatsAppMessage(phone, text) {
     await sendWhatsApp(phone, `🕐 *Últimos 5 movimientos:*\n\n${lista}`);
     return;
   }
+
+  // ══════ CONFIRMACIÓN DE CATEGORÍA ══════
   if (ctx.step === 'confirm_cat') {
     const cats = {
       '1':'Alimentación','2':'Arriendo','3':'Servicios','4':'Transporte',
@@ -1547,6 +1552,8 @@ async function processWhatsAppMessage(phone, text) {
     }
     return;
   }
+
+  // ══════ PARSER IA ══════
   const parsed = await parseWithAI(lower, user.name, user.plan);
   if (parsed) {
     const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
@@ -1566,7 +1573,8 @@ async function processWhatsAppMessage(phone, text) {
     );
     return;
   }
-  await sendWhatsApp(phone, `Mmm, no entendí bien 🤔\n\nPrueba así:\n💸 _"pagué arriendo 800mil"_\n💵 _"me cayó el sueldo 2 millones"_\n💵 _"vendí mercancía 500k"_\n\nO escribe *menú* para ver todo 😊`);
+
+  await sendWhatsApp(phone, `Mmm, no entendí bien 🤔\n\nPrueba así:\n💸 _"pagué arriendo 800mil"_\n💵 _"me cayó el sueldo 2 millones"_\n💵 _"vendí mercancía 500k"_\n\nO escribe *menu* para ver todo 😊`);
 }
 
 // ══════ BUSCAR USUARIO ══════
@@ -1612,7 +1620,6 @@ Mensaje: "${text}"` }]
 
 // ══════ PARSER SIMPLE (fallback sin IA) ══════
 function parseFinancialMessage(text) {
-  // Normalizar montos colombianos
   let n = text
     .replace(/(\d+[\d.,]*)\s*mil(?:es)?/gi, (_,x) => String(parseFloat(x.replace(/[,.]/g,''))*1000))
     .replace(/(\d+[\d.,]*)\s*(?:millones?|palos?|megas?)/gi, (_,x) => String(parseFloat(x.replace(/[,.]/g,''))*1000000))
@@ -1626,7 +1633,6 @@ function parseFinancialMessage(text) {
   const amount = parseFloat(amtMatch[1].replace(/[,.]/g, ''));
   if (!amount || amount <= 0) return null;
 
-  // Palabras de ingreso — ampliadas con colombianismos
   const incWords = [
     'vendí','vendi','cobré','cobre','cobrar','ingreso','me pagaron','recibí','recibi',
     'venta','gané','gane','salario','sueldo','quincena','ingresaron','me ingresaron',
@@ -1647,12 +1653,10 @@ function parseFinancialMessage(text) {
   ];
 
   const tl = n.toLowerCase();
-  let type = 'expense'; // por defecto gasto
+  let type = 'expense';
   for (const w of incWords) { if (tl.includes(w)) { type = 'income'; break; } }
-  // Si tiene palabra de gasto explícita, sobreescribe
   for (const w of expWords) { if (tl.includes(w)) { type = 'expense'; break; } }
 
-  // Limpiar descripción
   let desc = text
     .replace(/\$?\s*[\d,.]+\s*(?:mil(?:es)?|millones?|palos?|k\b|pesos)?/gi, '')
     .replace(/pagué|pague|gasté|gaste|compré|compre|cancelé|cancele|cuota de|vendí|vendi|cobré|cobre|ingresaron|me ingresaron|me pagaron|recibí|recibi|gané|gane|me cayó|me cayo|depositaron|abonaron|llegó|llego|entró|entro|salió|salio|se fue|me costó|me costo|fui al|fui a/gi, '')
@@ -1674,7 +1678,6 @@ function autoCategory(text, type) {
     if (/cobr|deuda|prestamo|me debían|me debian|abono|pagaron/i.test(d)) return 'Cobros';
     return 'Otros ingresos';
   }
-  // Gastos
   if (/luz|electricidad|enel|codensa|agua|acueducto|gas natural|surtigas|internet|claro|tigo|etb|movistar|teléfono|telefono|celular|plan celular|wifi|cable|tv|servicio público|servicio publico/i.test(d)) return 'Servicios';
   if (/arriendo|alquiler|renta|arrendamiento|administración|administracion/i.test(d)) return 'Arriendo';
   if (/mercado|supermercado|exito|carulla|olimpica|makro|comida|almuerzo|desayuno|cena|restaurante|comedor|cafetería|cafeteria|domicilio|rappi|ifood|dominos|pizza|pollo|hamburguesa|fritura|arepas|pandebono/i.test(d)) return 'Alimentación';
@@ -1694,7 +1697,9 @@ function autoCategory(text, type) {
 // ══════════════════════════════════════
 async function mostrarSubmenu(phone, modulo, user) {
   const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+  // FIX: usar setCtxByPhone directamente — limpio, sin merge
   await setCtxByPhone(phone, {step:'sub_'+modulo});
+
   switch(modulo) {
     case 'personal': case 'negocio': case 'pareja': {
       const mod = modulo==='pareja'?'parejas':modulo==='negocio'?'comerciantes':modulo;
@@ -1744,6 +1749,7 @@ async function mostrarSubmenu(phone, modulo, user) {
         `*1* Ver quien me debe\n*2* Ver a quien le debo\n*3* Registrar deuda\n*4* 📄 Informe PDF\n*0* Menu`
       );
       break;
+aver
     }
     case 'pagos': {
       const { data: cfg } = await supabase.from('user_configs').select('*').eq('user_id',user.id).single();
@@ -1830,6 +1836,9 @@ async function mostrarSubmenu(phone, modulo, user) {
 
 async function manejarSubmenu(phone, modulo, lower, user, ctx) {
   const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+  // helper para acceder al text original desde el contexto de llamada
+  // lower ya viene normalizado, text original lo reconstruimos para insertar
+  const text = lower; // para insertar en DB, usamos lower (ya es texto limpio)
 
   async function generarPDFModulo(mod, titulo) {
     const modKey=mod==='pareja'?'parejas':mod==='negocio'?'comerciantes':mod;
@@ -1837,7 +1846,6 @@ async function manejarSubmenu(phone, modulo, lower, user, ctx) {
     const movs=data||[];
     const fecha=new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
     const html=generarHTMLInforme(movs,titulo,fecha,user.name);
-    const crypto=require('crypto');
     const token=crypto.randomBytes(16).toString('hex');
     await supabase.from('temp_files').insert({token,content:html,filename:`informe-${mod}.html`,expires_at:new Date(Date.now()+24*60*60*1000).toISOString()});
     return `https://micaja-backend-production.up.railway.app/api/download/${token}`;
@@ -1870,10 +1878,10 @@ async function manejarSubmenu(phone, modulo, lower, user, ctx) {
         catch(e){ await sendWhatsApp(phone,`Error generando PDF.\n\n*0* Menu`); }
       } else if(lower==='6'&&modulo!=='personal'){
         await supabase.from('users').update({plan:mod}).eq('id',user.id);
-        await clearCtx(); await sendWhatsApp(phone,`✅ Modulo: *${planNames[mod]}* 💪\n\nEscribe *menu*`);
+        await setCtxByPhone(phone,{});
+        await sendWhatsApp(phone,`✅ Modulo: *${planNames[mod]}* 💪\n\nEscribe *menu*`);
       } else if(ctx.esperando==='gasto'||ctx.esperando==='ingreso'){
-        // Procesar movimiento directo desde submenu
-        const parsed=await parseWithAI(text,user.name,ctx.modulo||user.plan);
+        const parsed=await parseWithAI(lower,user.name,ctx.modulo||user.plan);
         if(parsed){
           const modTarget=ctx.modulo||user.plan;
           await setCtxByPhone(phone,{step:`sub_${modulo}`,step2:'confirm_submenu',type:parsed.type,amount:parsed.amount,description:parsed.description,category:parsed.category,modulo:modTarget});
@@ -1911,7 +1919,7 @@ async function manejarSubmenu(phone, modulo, lower, user, ctx) {
           const totalMD=meDeben.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
           const totalYD=yoDebo.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
           const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Deudas</title><style>body{font-family:Segoe UI,sans-serif;padding:28px;color:#0F172A}h1{font-size:20px;font-weight:800;margin-bottom:3px}.sub{color:#64748B;font-size:12px;margin-bottom:18px}.cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:18px}.card{border-radius:10px;padding:14px;text-align:center}.val{font-size:18px;font-weight:800;margin:4px 0}.lbl{font-size:11px;color:#64748B}.sec h3{font-size:13px;font-weight:700;margin:14px 0 8px;border-bottom:2px solid #E2E8F0;padding-bottom:4px}.row{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #F8FAFC;font-size:11px}.footer{margin-top:20px;font-size:10px;color:#94A3B8;text-align:center;border-top:1px solid #E2E8F0;padding-top:10px}</style></head><body><h1>Deudas</h1><div class="sub">${new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'})} — ${user.name||''}</div><div class="cards"><div class="card" style="background:#ECFDF5;border:1px solid #6EE7B7"><div class="val" style="color:#059669">$${totalMD.toLocaleString()}</div><div class="lbl">Me deben</div></div><div class="card" style="background:#FEF2F2;border:1px solid #FCA5A5"><div class="val" style="color:#EF4444">$${totalYD.toLocaleString()}</div><div class="lbl">Yo debo</div></div><div class="card" style="background:${totalMD>=totalYD?'#EFF6FF':'#FEF2F2'};border:1px solid ${totalMD>=totalYD?'#93C5FD':'#FCA5A5'}"><div class="val" style="color:${totalMD>=totalYD?'#2563EB':'#EF4444'}">${totalMD>=totalYD?'+':''}$${(totalMD-totalYD).toLocaleString()}</div><div class="lbl">Balance</div></div></div><div class="sec"><h3>Me deben</h3>${meDeben.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#059669">$${p.toLocaleString()}</span></div>`;}).join('')}</div><div class="sec"><h3>Yo debo</h3>${yoDebo.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#EF4444">$${p.toLocaleString()}</span></div>`;}).join('')}</div><div class="footer">MiCaja — milkomercios.in/MiCaja</div></body></html>`;
-          const crypto=require('crypto'); const token=crypto.randomBytes(16).toString('hex');
+          const token=crypto.randomBytes(16).toString('hex');
           await supabase.from('temp_files').insert({token,content:html,filename:'deudas.html',expires_at:new Date(Date.now()+24*60*60*1000).toISOString()});
           await sendWhatsApp(phone,`📄 *Informe Deudas*\n\n📥 https://micaja-backend-production.up.railway.app/api/download/${token}\n_24 horas_\n\n*0* Menu`);
         }catch(e){await sendWhatsApp(phone,`Error generando PDF.\n\n*0* Menu`);}
@@ -1952,9 +1960,9 @@ async function manejarSubmenu(phone, modulo, lower, user, ctx) {
         await setCtxByPhone(phone,{step:'sub_mercado',esperando:'item_mercado'});
         await sendWhatsApp(phone,`Que producto necesitas?\n_"leche 2 litros"_\n\n*0* Cancelar`);
       } else if(ctx.esperando==='item_mercado'){
-        await supabase.from('mercado').insert({user_id:user.id,nombre:text.trim(),cantidad:null,categoria:'Otros',done:false});
+        await supabase.from('mercado').insert({user_id:user.id,nombre:lower.trim(),cantidad:null,categoria:'Otros',done:false});
         await setCtxByPhone(phone,{step:'sub_mercado'});
-        await sendWhatsApp(phone,`✅ *${text.trim()}* agregado!\n\n*1* Ver lista | *2* Agregar otro | *0* Menu`);
+        await sendWhatsApp(phone,`✅ *${lower.trim()}* agregado!\n\n*1* Ver lista | *2* Agregar otro | *0* Menu`);
       } else { await mostrarSubmenu(phone,'mercado',user); }
       break;
     }
@@ -1968,9 +1976,9 @@ async function manejarSubmenu(phone, modulo, lower, user, ctx) {
         await setCtxByPhone(phone,{step:'sub_tareas',esperando:'nueva_tarea'});
         await sendWhatsApp(phone,`Escribe la tarea:\n_"llamar al banco"_\n\n*0* Cancelar`);
       } else if(ctx.esperando==='nueva_tarea'){
-        await supabase.from('tasks').insert({user_id:user.id,titulo:text.trim(),prioridad:'media',done:false});
+        await supabase.from('tasks').insert({user_id:user.id,titulo:lower.trim(),prioridad:'media',done:false});
         await setCtxByPhone(phone,{step:'sub_tareas'});
-        await sendWhatsApp(phone,`✅ *${text.trim()}* agregada!\n\n*1* Ver tareas | *2* Otra | *0* Menu`);
+        await sendWhatsApp(phone,`✅ *${lower.trim()}* agregada!\n\n*1* Ver tareas | *2* Otra | *0* Menu`);
       } else { await mostrarSubmenu(phone,'tareas',user); }
       break;
     }
@@ -2014,7 +2022,7 @@ async function manejarSubmenu(phone, modulo, lower, user, ctx) {
           const {data:movs}=await query;
           const fecha=new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
           const html=generarHTMLInforme(movs||[],titulos[lower],fecha,user.name);
-          const crypto=require('crypto');const token=crypto.randomBytes(16).toString('hex');
+          const token=crypto.randomBytes(16).toString('hex');
           await supabase.from('temp_files').insert({token,content:html,filename:`informe.html`,expires_at:new Date(Date.now()+24*60*60*1000).toISOString()});
           const inc=(movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
           const exp=(movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
@@ -2028,19 +2036,15 @@ async function manejarSubmenu(phone, modulo, lower, user, ctx) {
       const plan=opMap[lower];
       if(plan){
         await supabase.from('users').update({plan}).eq('id',user.id);
-        await clearCtx();
+        await setCtxByPhone(phone,{});
         await sendWhatsApp(phone,`✅ Modulo: *${planNames[plan]}* 💪\n\nEscribe *menu* para continuar`);
       } else { await mostrarSubmenu(phone,'modulo',user); }
       break;
     }
     default:
-      await clearCtx();
+      await setCtxByPhone(phone,{});
       await sendWhatsApp(phone,`Escribe *menu* 😊`);
   }
-}
-
-async function setCtxByPhone(phone, ctx) {
-  await supabase.from('wa_sessions').upsert({phone, context: JSON.stringify(ctx), updated_at: new Date().toISOString()}, {onConflict:'phone'});
 }
 
 // ══════ GENERADOR DE INFORME HTML UNIFICADO ══════
@@ -2343,9 +2347,10 @@ app.get('/api/payments/status/:userId', async (req, res) => {
 
 // ══════ INICIAR ══════
 app.listen(PORT, () => {
-  console.log(`⚡ MiCaja Backend v2.1 en puerto ${PORT}`);
+  console.log(`⚡ MiCaja Backend v2.2 en puerto ${PORT}`);
   console.log(`📊 Supabase: ${SUPABASE_URL ? '✅' : '⚠️'}`);
   console.log(`📱 WhatsApp: ${WA_TOKEN ? '✅' : '⚠️ simulado'}`);
   console.log(`💳 Bold: ${BOLD_API_KEY ? '✅' : '⚠️ sin configurar'}`);
   console.log(`🛡️ Rate limiting: ✅ activo`);
+  console.log(`🔧 Fix sesiones v2.2: ✅ activo`);
 });
