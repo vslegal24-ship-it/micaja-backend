@@ -1248,6 +1248,7 @@ async function processWhatsAppMessage(phone, text) {
 
   // ══════ SALUDO / INICIO ══════
   if (['hola','hi','hey','buenas','buenos dias','buenas tardes','buenas noches','que mas','inicio','start'].includes(lower)) {
+    await clearCtx(); // Siempre limpiar contexto al saludar
     const hour = new Date(new Date().toLocaleString('en-US',{timeZone:'America/Bogota'})).getHours();
     const saludo = hour < 12 ? 'Buenos dias' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
     const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
@@ -1265,8 +1266,15 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
+  // ══════ COMANDOS GLOBALES — siempre funcionan sin importar el contexto ══════
+  if (['cancelar','cancel','reset','reiniciar','limpiar','salir','exit'].includes(lower)) {
+    await clearCtx();
+    await sendWhatsApp(phone, `✅ Listo, contexto limpiado.\n\nEscribe *hola* o *menu* para empezar 😊`);
+    return;
+  }
+
   // ══════ MENÚ PRINCIPAL NAVEGABLE ══════
-  const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver','volver al menu','salir','0'].includes(lower);
+  const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver','volver al menu','0'].includes(lower);
   if (esMenu) {
     await clearCtx();
     const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
