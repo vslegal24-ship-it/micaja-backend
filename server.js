@@ -1106,7 +1106,9 @@ async function processWhatsAppMessage(phone, text) {
     (movs||[]).filter(m=>m.type==='expense').forEach(m=>{byCat[m.category]=(byCat[m.category]||0)+Number(m.amount);});
     const topCats = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,v])=>`  • ${c}: $${v.toLocaleString()}`).join('\n');
     try {
-      const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Informe</title><style>body{font-family:Segoe UI,sans-serif;padding:24px;color:#0F172A}h1{font-size:18px;font-weight:800;margin-bottom:4px}.sub{color:#64748B;font-size:11px;margin-bottom:16px}.cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px}.card{border-radius:8px;padding:12px;text-align:center}.val{font-size:16px;font-weight:800;margin:4px 0}.lbl{font-size:10px;color:#64748B}.mov{padding:3px 0;border-bottom:1px solid #F1F5F9;font-size:11px}.footer{margin-top:16px;font-size:9px;color:#94A3B8;text-align:center}</style></head><body><h1>${planNames[module]}</h1><div class="sub">${new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'})} · ${(movs||[]).length} movimientos</div><div class="cards"><div class="card" style="background:#ECFDF5;border:1px solid #6EE7B7"><div class="val" style="color:#059669">$${inc.toLocaleString()}</div><div class="lbl">Ingresos</div></div><div class="card" style="background:#FEF2F2;border:1px solid #FCA5A5"><div class="val" style="color:#EF4444">$${exp.toLocaleString()}</div><div class="lbl">Gastos</div></div><div class="card" style="background:${bal>=0?'#EFF6FF':'#FEF2F2'};border:1px solid ${bal>=0?'#93C5FD':'#FCA5A5'}"><div class="val" style="color:${bal>=0?'#2563EB':'#EF4444'}">${bal>=0?'+':''}$${bal.toLocaleString()}</div><div class="lbl">Balance</div></div></div>${(movs||[]).slice(0,30).map(m=>`<div class="mov">${m.type==='income'?'↑':'↓'} ${m.description} — $${Number(m.amount).toLocaleString()} <span style="color:#94A3B8;font-size:9px">${m.date} · ${m.category||''}</span></div>`).join('')}<div class="footer">MiCaja — milkomercios.in/MiCaja</div></body></html>`;
+      // Usar función unificada — mismo diseño que la web
+      const fecha = new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
+      const html = generarHTMLInforme(movs||[], planNames[module], fecha, user.name);
       const crypto = require('crypto');
       const token = crypto.randomBytes(16).toString('hex');
       await supabase.from('temp_files').insert({token, content: html, filename:`informe-${module}.html`, expires_at: new Date(Date.now()+24*60*60*1000).toISOString()});
@@ -1409,6 +1411,57 @@ function autoCategory(text, type) {
   if (/cuota casa|cuota carro|cuota moto|cuota crédito|cuota credito|hipoteca|banco|leasing|préstamo|prestamo|crédito|credito|tarjeta|bancolombia|davivienda|bbva|bogotá|bogota/i.test(d)) return 'Créditos';
   if (/ropa|zapatos|calzado|vestido|ropa|almacén|almacen|zapatería|zapateria/i.test(d)) return 'Ropa';
   return 'Otros';
+}
+
+// ══════ GENERADOR DE INFORME HTML UNIFICADO ══════
+function generarHTMLInforme(movs, titulo, periodo, userName) {
+  const COLORS_EXP = ['#EF4444','#DC2626','#F87171','#FCA5A5','#B91C1C','#991B1B'];
+  const COLORS_INC = ['#25D366','#059669','#34D399','#3B82F6','#8B5CF6','#F59E0B'];
+  const inc = movs.filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
+  const exp = movs.filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
+  const util = inc - exp;
+  const byCatExp = {}, byCatInc = {};
+  movs.forEach(m=>{const c=m.category||'Otros';if(m.type==='expense')byCatExp[c]=(byCatExp[c]||0)+Number(m.amount);else byCatInc[c]=(byCatInc[c]||0)+Number(m.amount);});
+  const totalExp = Object.values(byCatExp).reduce((s,v)=>s+v,0)||1;
+  const totalInc = Object.values(byCatInc).reduce((s,v)=>s+v,0)||1;
+
+  const bars = (byCat, total, colors) => Object.keys(byCat).sort((a,b)=>byCat[b]-byCat[a]).map((k,i)=>{
+    const pct = Math.round((byCat[k]/total)*100);
+    return `<div style="margin-bottom:7px"><div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${colors[i%colors.length]};margin-right:5px;vertical-align:middle"></span>${k}</span><span>$${byCat[k].toLocaleString()} - ${pct}%</span></div><div style="background:#F1F5F9;border-radius:4px;height:8px"><div style="width:${pct}%;height:8px;background:${colors[i%colors.length]};border-radius:4px"></div></div></div>`;
+  }).join('');
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${titulo}</title>
+<style>
+body{font-family:Segoe UI,sans-serif;padding:28px;color:#0F172A}
+h1{font-size:20px;font-weight:800;margin-bottom:3px}
+.sub{color:#64748B;font-size:12px;margin-bottom:18px}
+.cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:18px}
+.card{border-radius:10px;padding:14px;text-align:center}
+.val{font-size:18px;font-weight:800;margin:4px 0}
+.lbl{font-size:11px;color:#64748B}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
+.chart-sec{border:1px solid #E2E8F0;border-radius:8px;padding:14px}
+.chart-sec h3{font-size:12px;font-weight:700;margin-bottom:10px}
+.movs h3{font-size:13px;font-weight:700;margin-bottom:8px;border-bottom:2px solid #E2E8F0;padding-bottom:6px}
+.mov-row{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid #F8FAFC;font-size:11px}
+.footer{margin-top:20px;font-size:10px;color:#94A3B8;text-align:center;border-top:1px solid #E2E8F0;padding-top:10px}
+</style></head><body>
+<h1>${titulo}</h1>
+<div class="sub">Informe - ${periodo} - ${new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'})}</div>
+<div class="cards">
+  <div class="card" style="background:#ECFDF5;border:1px solid #6EE7B7"><div class="val" style="color:#059669">$${inc.toLocaleString()}</div><div class="lbl">Ingresos</div></div>
+  <div class="card" style="background:#FEF2F2;border:1px solid #FCA5A5"><div class="val" style="color:#EF4444">$${exp.toLocaleString()}</div><div class="lbl">Gastos</div></div>
+  <div class="card" style="background:${util>=0?'#EFF6FF':'#FEF2F2'};border:1px solid ${util>=0?'#93C5FD':'#FCA5A5'}"><div class="val" style="color:${util>=0?'#2563EB':'#EF4444'}">${util>=0?'+':''}$${util.toLocaleString()}</div><div class="lbl">${titulo.includes('Negocio')?'Utilidad':'Balance'}</div></div>
+</div>
+<div class="charts">
+  <div class="chart-sec"><h3>Gastos por categoria</h3>${Object.keys(byCatExp).length?bars(byCatExp,totalExp,COLORS_EXP):'<p style="color:#94A3B8;font-size:11px">Sin gastos</p>'}</div>
+  <div class="chart-sec"><h3>Ingresos por categoria</h3>${Object.keys(byCatInc).length?bars(byCatInc,totalInc,COLORS_INC):'<p style="color:#94A3B8;font-size:11px">Sin ingresos</p>'}</div>
+</div>
+<div class="movs"><h3>Movimientos (${movs.length})</h3>
+${movs.map(m=>`<div class="mov-row"><span style="width:8px;height:8px;border-radius:50%;background:${m.type==='income'?'#25D366':'#EF4444'};flex-shrink:0;margin-top:2px;display:inline-block"></span><span style="flex:1">${m.description}</span><span style="color:#94A3B8;min-width:80px">${m.category||''}</span><span style="color:#94A3B8;min-width:75px">${m.date}</span><span style="font-weight:700;color:${m.type==='income'?'#059669':'#EF4444'}">${m.type==='income'?'+':'-'}$${Number(m.amount).toLocaleString()}</span></div>`).join('')}
+</div>
+<div class="footer">MiCaja - milkomercios.in/MiCaja${userName?' - '+userName:''}</div>
+</body></html>`;
 }
 
 // ══════ ENVIAR WHATSAPP ══════
