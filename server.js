@@ -984,7 +984,10 @@ app.post('/webhook', async (req, res) => {
 // ══════════════════════════════════════
 async function processWhatsAppMessage(phone, text) {
   let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
-  const lower = text.toLowerCase().trim();
+  // Normalizar: minúsculas + quitar tildes/acentos para no requerir tilde en comandos
+  const lower = text.toLowerCase().trim()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[¿¡]/g, '');
   let { data: session } = await supabase.from('wa_sessions').select('*').eq('phone', phone).single();
   const ctx = session?.context ? JSON.parse(session.context) : {};
 
@@ -1038,7 +1041,7 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
   // ══════ MÓDULO — consultar y cambiar ══════
-  const esConsultaModulo = /^(mi\s+)?m[oó]dulo(\s+actual|\s+activo)?$|^en\s+qu[eé]\s+m[oó]dulo|^qu[eé]\s+m[oó]dulo|^m[oó]dulos\s+disponibles?|^ver\s+m[oó]dulos?/i.test(lower);
+  const esConsultaModulo = /^(mi\s+)?modulo(\s+actual|\s+activo)?$|^en\s+que\s+modulo|^que\s+modulo|^modulos\s+disponibles?|^ver\s+modulos?|^mis\s+modulos?/i.test(lower);
   if (esConsultaModulo) {
     const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
     const actual = planNames[user.plan] || '👤 Personal';
@@ -1050,41 +1053,51 @@ async function processWhatsAppMessage(phone, text) {
       `*3* 💑 Pareja — gastos compartidos\n` +
       `*4* ✈️ Viajes — gastos de un viaje\n\n` +
       `Responde con el número o escribe:\n` +
-      `_"módulo personal"_ · _"módulo negocio"_ · _"módulo pareja"_ · _"módulo viajes"_`
+      `_"modulo personal"_ · _"modulo negocio"_ · _"modulo pareja"_ · _"modulo viajes"_`
     );
     await setCtx({step:'select_modulo'});
     return;
   }
   if (ctx.step === 'select_modulo') {
     const opMap = {'1':'personal','2':'comerciantes','3':'parejas','4':'viajes'};
-    const planMap = {personal:'personal',finanzas:'personal','mis finanzas':'personal',pareja:'parejas',parejas:'parejas',viaje:'viajes',viajes:'viajes',negocio:'comerciantes',comercio:'comerciantes',comerciante:'comerciantes','mi negocio':'comerciantes'};
+    const planMap = {
+      personal:'personal',finanzas:'personal','mis finanzas':'personal',
+      pareja:'parejas',parejas:'parejas',
+      viaje:'viajes',viajes:'viajes',
+      negocio:'comerciantes',comercio:'comerciantes',comerciante:'comerciantes','mi negocio':'comerciantes'
+    };
     const plan = opMap[lower] || planMap[lower];
     if (plan) {
       await supabase.from('users').update({plan}).eq('id', user.id);
       await clearCtx();
       const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-      await sendWhatsApp(phone, `✅ *Módulo cambiado a ${planNames[plan]}* 💪\n\nAhora todos tus movimientos se guardan en este módulo.\n_Escribe "cómo voy" para ver tu balance_`);
+      await sendWhatsApp(phone, `✅ *Módulo cambiado a ${planNames[plan]}* 💪\n\nAhora todos tus movimientos se guardan en este módulo.\n_Escribe "como voy" para ver tu balance_`);
     } else {
-      await sendWhatsApp(phone, `Responde *1* Personal, *2* Negocio, *3* Pareja o *4* Viajes\nO escribe _"módulo negocio"_ etc.`);
+      await sendWhatsApp(phone, `Responde *1* Personal, *2* Negocio, *3* Pareja o *4* Viajes\nO escribe _"modulo negocio"_ etc.`);
     }
     return;
   }
-  const moduloMatch = lower.match(/^(?:m[oó]dulo|cambiar\s+m[oó]dulo|cambiar\s+a|quiero\s+el\s+m[oó]dulo)\s+(.+)/i);
+  const moduloMatch = lower.match(/^(?:modulo|cambiar\s+modulo|cambiar\s+a|quiero\s+el\s+modulo|quiero\s+modulo|usar\s+modulo)\s+(.+)/i);
   if (moduloMatch) {
-    const planMap = {personal:'personal',finanzas:'personal','mis finanzas':'personal',pareja:'parejas',parejas:'parejas',viaje:'viajes',viajes:'viajes',negocio:'comerciantes',comercio:'comerciantes',comerciante:'comerciantes','mi negocio':'comerciantes'};
+    const planMap = {
+      personal:'personal',finanzas:'personal','mis finanzas':'personal',
+      pareja:'parejas',parejas:'parejas',
+      viaje:'viajes',viajes:'viajes',
+      negocio:'comerciantes',comercio:'comerciantes',comerciante:'comerciantes','mi negocio':'comerciantes'
+    };
     const plan = planMap[moduloMatch[1].trim().toLowerCase()];
     if (plan) {
       await supabase.from('users').update({plan}).eq('id', user.id);
       const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
       await sendWhatsApp(phone, `✅ Módulo cambiado a *${planNames[plan]}* 💪`);
     } else {
-      await sendWhatsApp(phone, `Módulos disponibles:\n*personal* · *pareja* · *viajes* · *negocio*\n\nEjemplo: _"módulo negocio"_`);
+      await sendWhatsApp(phone, `Módulos disponibles:\n*personal* · *pareja* · *viajes* · *negocio*\n\nEjemplo: _"modulo negocio"_`);
     }
     return;
   }
 
   // ══════ TAREAS ══════
-  if (/mis\s+tareas?|ver\s+tareas?|tareas?\s+pendientes?|qu[eé]\s+tengo\s+pendiente|lista\s+de\s+tareas?/i.test(lower)) {
+  if (/mis\s+tareas?|ver\s+tareas?|tareas?\s+pendientes?|que\s+tengo\s+pendiente|lista\s+de\s+tareas?/i.test(lower)) {
     const {data:tareas} = await supabase.from('tasks').select('*').eq('user_id',user.id).eq('done',false).order('prioridad').limit(10);
     if (!tareas||!tareas.length) {
       await sendWhatsApp(phone, `✅ *Tareas pendientes*\n\n¡No tienes tareas pendientes! 🎉\n\n_Agrega desde la web: milkomercios.in/MiCaja/tareas.html_`);
@@ -1097,7 +1110,7 @@ async function processWhatsAppMessage(phone, text) {
   }
 
   // ══════ LISTA DE MERCADO ══════
-  if (/mi\s+(?:lista\s+de\s+)?mercado|lista\s+(?:del\s+)?mercado|qu[eé]\s+necesito\s+comprar|mis\s+compras?|lista\s+compras?/i.test(lower)) {
+  if (/mi\s+(?:lista\s+de\s+)?mercado|lista\s+(?:del\s+)?mercado|que\s+necesito\s+comprar|mis\s+compras?|lista\s+compras?/i.test(lower)) {
     const {data:items} = await supabase.from('mercado').select('*').eq('user_id',user.id).eq('done',false).order('created_at',{ascending:false}).limit(15);
     if (!items||!items.length) {
       await sendWhatsApp(phone, `🛒 *Lista de mercado*\n\n¡Tu lista está vacía! 🎉\n\n_Agrega productos desde la web: milkomercios.in/MiCaja/mercado.html_`);
@@ -1117,7 +1130,7 @@ async function processWhatsAppMessage(phone, text) {
   }
 
   // ══════ SERVICIOS PÚBLICOS ══════
-  if (/mis\s+servicios?|servicios?\s+p[uú]blicos?|cu[aá]les\s+son\s+mis\s+servicios?|vencimientos?|qu[eé]\s+vence|pagos?\s+pendientes?\s+(?:del\s+)?mes/i.test(lower)) {
+  if (/mis\s+servicios?|servicios?\s+publicos?|cuales\s+son\s+mis\s+servicios?|vencimientos?|que\s+vence|pagos?\s+pendientes?\s+(?:del\s+)?mes/i.test(lower)) {
     const {data:servs} = await supabase.from('servicios').select('*').eq('user_id',user.id).order('dia');
     if (!servs||!servs.length) {
       await sendWhatsApp(phone, `🔔 *Servicios*\n\nNo tienes servicios configurados.\n\n_Configura desde la web: milkomercios.in/MiCaja/servicios.html_`);
@@ -1152,7 +1165,7 @@ async function processWhatsAppMessage(phone, text) {
   }
 
   // ══════ DEUDAS ══════
-  if (/mis\s+deudas?|ver\s+deudas?|cu[aá]nto\s+(?:me\s+)?debo|estado\s+deudas?|deudas?\s+pendientes?|qui[eé]n(?:es)?\s+me\s+deben?|a\s+qui[eé]n(?:es)?\s+(?:le\s+)?debo/i.test(lower)) {
+  if (/mis\s+deudas?|ver\s+deudas?|cuanto\s+(?:me\s+)?debo|estado\s+deudas?|deudas?\s+pendientes?|quien(?:es)?\s+me\s+deben?|a\s+quien(?:es)?\s+(?:le\s+)?debo/i.test(lower)) {
     const {data:deudas} = await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid');
     if (!deudas||!deudas.length) {
       await sendWhatsApp(phone, `💸 *Deudas*\n\n¡No tienes deudas activas! 🎉\n\n_Registra desde la web: milkomercios.in/MiCaja/deudas.html_`);
@@ -1182,7 +1195,7 @@ async function processWhatsAppMessage(phone, text) {
   }
 
   // ══════ MÉTODOS DE PAGO (Nequi, Bancolombia, etc) ══════
-  if (/mi\s+nequi|mi\s+bancol|mi\s+daviplata|mi\s+banco|mis\s+datos?\s+(?:de\s+)?pago|mis\s+llaves?|c[oó]mo\s+me\s+pagan|datos?\s+(?:para\s+)?transferencia|mi\s+cuenta|mi\s+n[uú]mero\s+(?:de\s+)?cuenta|mis\s+m[eé]todos?\s+(?:de\s+)?pago/i.test(lower)) {
+  if (/mi\s+nequi|mi\s+bancol|mi\s+daviplata|mi\s+banco|mis\s+datos?\s+(?:de\s+)?pago|mis\s+llaves?|como\s+me\s+pagan|datos?\s+(?:para\s+)?transferencia|mi\s+cuenta|mi\s+numero\s+(?:de\s+)?cuenta|mis\s+metodos?\s+(?:de\s+)?pago/i.test(lower)) {
     const {data:cfg} = await supabase.from('user_configs').select('*').eq('user_id',user.id).single();
     const nequi = cfg?.nequi;
     const bancol = cfg?.bancolombia;
