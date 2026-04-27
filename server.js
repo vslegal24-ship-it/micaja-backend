@@ -2260,11 +2260,15 @@ app.get('/api/admin/users', verifyAdmin, async (req, res) => {
     const { data: users } = await supabase.from('users').select('*').order('created_at', { ascending: false });
     if (!users) return res.json({ ok: true, users: [] });
     const enriched = await Promise.all(users.map(async u => {
-      const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', u.id);
+      const { data: movs } = await supabase.from('movements').select('type, amount, module, created_at').eq('user_id', u.id).order('created_at', { ascending: false });
       const count = (movs||[]).length;
       const income = (movs||[]).filter(m => m.type==='income').reduce((s,m) => s+Number(m.amount), 0);
+      // Módulos con actividad real
+      const modsUsados = [...new Set((movs||[]).map(m => m.module).filter(Boolean))];
+      // Último movimiento (fecha más reciente de actividad)
+      const lastActivity = (movs||[]).length ? movs[0].created_at?.split('T')[0] : null;
       const { pin: _, verify_code: __, ...safeUser } = u;
-      return { ...safeUser, movement_count: count, income_total: income };
+      return { ...safeUser, movement_count: count, income_total: income, modules_used: modsUsados, last_activity: lastActivity };
     }));
     res.json({ ok: true, users: enriched });
   } catch (err) { res.status(500).json({ error: 'Error al obtener usuarios' }); }
@@ -2408,11 +2412,11 @@ app.get('/api/payments/link/:phone', async (req, res) => {
     const { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
     const orderId = `MICAJA-${user.id.slice(0,8)}-${Date.now()}`;
-    const integString = `${orderId}20000COP${BOLD_SECRET_KEY}`;
+    const integString = `${orderId}15000COP${BOLD_SECRET_KEY}`;
     const integritySignature = crypto.createHash('sha256').update(integString).digest('hex');
     const token = crypto.createHash('sha256').update(`${phone}-${Date.now()}-${BOLD_SECRET_KEY}`).digest('hex').slice(0, 16);
     const tokenExpiry = Date.now() + 30*60*1000;
-    await supabase.from('payments').insert({ user_id: user.id, amount: 20000, method: 'bold', reference: orderId, status: 'pending', pay_token: token, token_expiry: tokenExpiry, period_start: new Date().toISOString().split('T')[0], period_end: new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0] });
+    await supabase.from('payments').insert({ user_id: user.id, amount: 15000, method: 'bold', reference: orderId, status: 'pending', pay_token: token, token_expiry: tokenExpiry, period_start: new Date().toISOString().split('T')[0], period_end: new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0] });
     res.json({ ok: true, url: `https://milkomercios.in/MiCaja/pagar.html?tel=${phone}&token=${token}` });
   } catch (err) { res.status(500).json({ error: 'Error generando link' }); }
 });
@@ -2425,9 +2429,9 @@ app.get('/api/payments/token/:phone/:token', async (req, res) => {
     const { data: payment } = await supabase.from('payments').select('*').eq('user_id', user.id).eq('pay_token', token).eq('status', 'pending').order('created_at', { ascending: false }).limit(1).single();
     if (!payment) return res.status(404).json({ error: 'Token no encontrado' });
     if (payment.token_expiry < Date.now()) return res.status(401).json({ error: 'Token expirado' });
-    const integString = `${payment.reference}20000COP${BOLD_SECRET_KEY}`;
+    const integString = `${payment.reference}15000COP${BOLD_SECRET_KEY}`;
     const integritySignature = crypto.createHash('sha256').update(integString).digest('hex');
-    res.json({ ok: true, orderId: payment.reference, amount: '20000', currency: 'COP', integritySignature, apiKey: BOLD_API_KEY, redirectionUrl: 'https://milkomercios.in/MiCaja/pagar.html', description: 'MiCaja - Suscripción mensual $20.000' });
+    res.json({ ok: true, orderId: payment.reference, amount: '15000', currency: 'COP', integritySignature, apiKey: BOLD_API_KEY, redirectionUrl: 'https://milkomercios.in/MiCaja/pagar.html', description: 'MiCaja - Suscripción mensual $15.000' });
   } catch (err) { res.status(500).json({ error: 'Error verificando token' }); }
 });
 
@@ -2437,7 +2441,7 @@ app.post('/api/payments/create', async (req, res) => {
     if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
     const { data: user } = await supabase.from('users').select('name, phone').eq('id', user_id).single();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-    const plans = { mensual: { amount: '20000', label: 'Suscripción mensual $20.000', days: 30 }, anual: { amount: '200000', label: 'Suscripción anual $200.000', days: 365 }, lifetime: { amount: '320000', label: 'Acceso de por vida $320.000', days: 36500 } };
+    const plans = { mensual: { amount: '15000', label: 'Suscripción mensual $15.000', days: 30 }, anual: { amount: '150000', label: 'Suscripción anual $150.000', days: 365 }, lifetime: { amount: '350000', label: 'Acceso de por vida $350.000', days: 36500 } };
     const plan = plans[plan_type] || plans.mensual;
     const orderId = `MICAJA-${user_id.slice(0,8)}-${Date.now()}`;
     const integString = `${orderId}${plan.amount}COP${BOLD_SECRET_KEY}`;
@@ -2461,7 +2465,7 @@ app.post('/api/payments/bold-webhook', async (req, res) => {
     await supabase.from('payments').update({ status: 'paid' }).eq('id', payment.id);
     await supabase.from('users').update({ status: 'active' }).eq('id', payment.user_id);
     const userPhone = payment.users?.phone;
-    if (userPhone && WA_TOKEN) await sendWhatsApp(userPhone, `✅ *¡Pago recibido!*\n\n💰 $20.000 COP — MiCaja mensual\n📅 Válido hasta: ${payment.period_end}\n🔢 Ref: ${orderId}\n\n¡Gracias! Tu acceso está activo 🚀\n🌐 milkomercios.in/MiCaja/dashboard.html`);
+    if (userPhone && WA_TOKEN) await sendWhatsApp(userPhone, `✅ *¡Pago recibido!*\n\n💰 $15.000 COP — MiCaja mensual\n📅 Válido hasta: ${payment.period_end}\n🔢 Ref: ${orderId}\n\n¡Gracias! Tu acceso está activo 🚀\n🌐 milkomercios.in/MiCaja/dashboard.html`);
     res.sendStatus(200);
   } catch (err) { console.error('Bold webhook error:', err); res.sendStatus(200); }
 });
