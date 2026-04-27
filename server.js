@@ -1213,7 +1213,15 @@ async function processWhatsAppMessage(phone, text) {
           const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
           await setCtxByPhone(phone, { step: 'confirm_cat', type: parsed.type, amount: parsed.amount, description: parsed.description, category: parsed.category, returnTo: ctx.step });
           await sendWhatsApp(phone,
-            `${parsed.type==='income'?'💵':'💸'} *¿Confirmas?*\n\n📝 *${parsed.description}*\n💰 ${parsed.type==='income'?'+':'-'}${Number(parsed.amount).toLocaleString()} COP\n📂 ${parsed.category} · *${planNames[user.plan]}*\n\n✅ *sí* guardar · 🔢 *1-12* cat · ❌ *no* cancelar\n\n_1.Alimentación 2.Arriendo 3.Servicios 4.Transporte 5.Salud 6.Entretenimiento 7.Educación 8.Nómina 9.Proveedores 10.Créditos 11.Ventas 12.Otros_`
+            `${parsed.type==='income'?'💵':'💸'} *¿Confirmas este ${parsed.type==='income'?'ingreso':'gasto'}?*\n\n` +
+            `📝 *${parsed.description}*\n` +
+            `💰 ${parsed.type==='income'?'+':'-'}$${Number(parsed.amount).toLocaleString()} COP\n` +
+            `📂 Categoría: *${parsed.category}*\n` +
+            `📋 Módulo: *${planNames[user.plan]}*\n\n` +
+            `✅ *sí* — guardar\n` +
+            `🔢 *1-12* — cambiar categoría\n` +
+            `❌ *no* — cancelar\n\n` +
+            `_1.Alimentación 2.Arriendo 3.Servicios 4.Transporte 5.Salud 6.Entretenimiento 7.Educación 8.Nómina 9.Proveedores 10.Créditos 11.Ventas 12.Otros_`
           );
           return;
         }
