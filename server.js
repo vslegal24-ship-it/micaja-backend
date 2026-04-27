@@ -978,6 +978,11 @@ async function getCtxByPhone(phone) {
 // ══════════════════════════════════════
 // PROCESAR MENSAJES DE WHATSAPP
 // ══════════════════════════════════════
+
+// ══════════════════════════════════════
+// PROCESAR MENSAJES DE WHATSAPP v2.3
+// Menú navegable con módulos reales
+// ══════════════════════════════════════
 async function processWhatsAppMessage(phone, text) {
   let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
 
@@ -985,15 +990,11 @@ async function processWhatsAppMessage(phone, text) {
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[¿¡]/g, '');
 
-  // ── Leer contexto fresco desde DB ──
-  // FIX: siempre leer directo de DB, no usar variable local que puede quedar desincronizada
   const ctx = await getCtxByPhone(phone);
+  const setCtx  = (newCtx) => setCtxByPhone(phone, newCtx);
+  const clearCtx = ()      => setCtxByPhone(phone, {});
 
-  // Helpers locales que usan la función global
-  const setCtx = (newCtx) => setCtxByPhone(phone, newCtx);
-  const clearCtx = () => setCtxByPhone(phone, {});
-
-  // ══════ REGISTRO SI NO TIENE CUENTA ══════
+  // ══════ SIN CUENTA ══════
   if (!user && ['registrar','registro','registrarme','empezar','comenzar','crear cuenta','nueva cuenta','quiero registrarme'].includes(lower)) {
     await setCtx({ step: 'register_plan' });
     await sendWhatsApp(phone, `🎉 ¡Bienvenido a *MiCaja*!\n\n¿Para qué quieres usarla?\n\n*1.* 👤 Personal\n*2.* 💑 Pareja\n*3.* ✈️ Viajes\n*4.* 🏪 Negocio\n\nResponde con el número`);
@@ -1024,63 +1025,35 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ COMANDOS GLOBALES — siempre funcionan, limpian contexto primero ══════
-  // FIX: estos comandos van ANTES de cualquier evaluación de ctx.step
-  const esReset = ['cancelar','cancel','reset','reiniciar','limpiar','salir','exit'].includes(lower);
-  if (esReset) {
+  // ══════ COMANDOS GLOBALES — siempre funcionan ══════
+  if (['cancelar','cancel','reset','reiniciar','limpiar','salir','exit'].includes(lower)) {
     await clearCtx();
-    await sendWhatsApp(phone, `✅ Listo, contexto limpiado.\n\nEscribe *hola* o *menu* para empezar 😊`);
+    await sendWhatsApp(phone, `✅ Listo.\n\nEscribe *hola* o *menu* para empezar 😊`);
     return;
   }
 
-  // ══════ SALUDO — limpia contexto y muestra balance ══════
+  // ══════ SALUDO ══════
   if (['hola','hi','hey','buenas','buenos dias','buenas tardes','buenas noches','que mas','inicio','start'].includes(lower)) {
     await clearCtx();
     const hour = new Date(new Date().toLocaleString('en-US',{timeZone:'America/Bogota'})).getHours();
-    const saludo = hour < 12 ? 'Buenos dias' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
+    const saludo = hour < 12 ? 'Buenos días' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
     const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
     const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', user.plan);
     const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
     await sendWhatsApp(phone,
       `${saludo} *${user.name||''}* 👋\n\n` +
-      `Modulo activo: *${planNames[user.plan]}*\n` +
+      `Módulo activo: *${planNames[user.plan]}*\n` +
       `${movs&&movs.length ? `Balance: *$${bal.toLocaleString()}* COP\n` : ''}\n` +
       `Escribe *menu* para ver todas las opciones\n` +
       `O registra directamente:\n` +
-      `💸 _"pague luz 80mil"_\n` +
+      `💸 _"pagué luz 80mil"_\n` +
       `💵 _"me ingresaron 2 millones"_`
     );
     return;
   }
 
-  // ══════ MENÚ PRINCIPAL ══════
-  // FIX: detectar "menu" SIN depender del ctx anterior — siempre funciona
-  const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver','volver al menu','0'].includes(lower);
-  if (esMenu) {
-    await clearCtx();
-    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-    await sendWhatsApp(phone,
-      `🤖 *MiCaja — Menu principal*\n` +
-      `Modulo activo: *${planNames[user.plan]}*\n\n` +
-      `*1* 💰 Finanzas personales\n` +
-      `*2* 🏪 Mi negocio\n` +
-      `*3* 💑 Pareja\n` +
-      `*4* ✈️ Viajes\n` +
-      `*5* 💸 Deudas\n` +
-      `*6* 💳 Metodos de pago\n` +
-      `*7* 🛒 Lista de mercado\n` +
-      `*8* ✅ Tareas\n` +
-      `*9* 🔔 Servicios y pagos\n` +
-      `*10* 📊 Informes\n\n` +
-      `Escribe el numero o el nombre del modulo`
-    );
-    // FIX: setCtx DESPUÉS de enviar el mensaje, con contexto limpio
-    await setCtx({ step: 'menu_principal' });
-    return;
-  }
-
   // ══════ PIN ══════
-  const pinConsulta = /^(mi\s+)?pin$|^(cuál|cual)\s+es\s+mi\s+pin|^(olvidé|olvide|recuperar|recordar|ver)\s+(mi\s+)?pin|^pin\?$/i;
+  const pinConsulta = /^(mi\s+)?pin$|^(cual)\s+es\s+mi\s+pin|^(olvide|recuperar|recordar|ver)\s+(mi\s+)?pin|^pin\?$/i;
   if (pinConsulta.test(lower)) {
     await sendWhatsApp(phone, `🔐 Tu PIN es: *${user.pin}*\n\nPara cambiarlo: _"cambiar pin 1234"_`);
     return;
@@ -1092,397 +1065,153 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ MÓDULO — consultar y cambiar ══════
-  const esConsultaModulo = /^(mi\s+)?modulo(\s+actual|\s+activo)?$|^en\s+que\s+modulo|^que\s+modulo|^modulos\s+disponibles?|^ver\s+modulos?|^mis\s+modulos?/i.test(lower);
-  if (esConsultaModulo) {
-    const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-    const actual = planNames[user.plan] || '👤 Personal';
-    await sendWhatsApp(phone,
-      `📋 *Módulo activo: ${actual}*\n\n` +
-      `Elige otro módulo:\n` +
-      `*1* 👤 Personal — finanzas del día a día\n` +
-      `*2* 🏪 Negocio — ventas y gastos del negocio\n` +
-      `*3* 💑 Pareja — gastos compartidos\n` +
-      `*4* ✈️ Viajes — gastos de un viaje\n\n` +
-      `Responde con el número o escribe:\n` +
-      `_"modulo personal"_ · _"modulo negocio"_ · _"modulo pareja"_ · _"modulo viajes"_`
-    );
-    await setCtx({step:'select_modulo'});
-    return;
-  }
-  if (ctx.step === 'select_modulo') {
-    const opMap = {'1':'personal','2':'comerciantes','3':'parejas','4':'viajes'};
-    const planMap = {
-      personal:'personal',finanzas:'personal','mis finanzas':'personal',
-      pareja:'parejas',parejas:'parejas',
-      viaje:'viajes',viajes:'viajes',
-      negocio:'comerciantes',comercio:'comerciantes',comerciante:'comerciantes','mi negocio':'comerciantes'
-    };
-    const plan = opMap[lower] || planMap[lower];
-    if (plan) {
-      await supabase.from('users').update({plan}).eq('id', user.id);
-      await clearCtx();
-      const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-      await sendWhatsApp(phone, `✅ *Módulo cambiado a ${planNames[plan]}* 💪\n\nAhora todos tus movimientos se guardan en este módulo.\n_Escribe "como voy" para ver tu balance_`);
-    } else {
-      await sendWhatsApp(phone, `Responde *1* Personal, *2* Negocio, *3* Pareja o *4* Viajes\nO escribe _"modulo negocio"_ etc.`);
-    }
-    return;
-  }
+  // ══════ MÓDULO — cambio directo ══════
   const moduloMatch = lower.match(/^(?:modulo|cambiar\s+modulo|cambiar\s+a|quiero\s+el\s+modulo|quiero\s+modulo|usar\s+modulo)\s+(.+)/i);
   if (moduloMatch) {
-    const planMap = {
-      personal:'personal',finanzas:'personal','mis finanzas':'personal',
-      pareja:'parejas',parejas:'parejas',
-      viaje:'viajes',viajes:'viajes',
-      negocio:'comerciantes',comercio:'comerciantes',comerciante:'comerciantes','mi negocio':'comerciantes'
-    };
+    const planMap = {personal:'personal',finanzas:'personal',pareja:'parejas',parejas:'parejas',viaje:'viajes',viajes:'viajes',negocio:'comerciantes',comercio:'comerciantes',comerciante:'comerciantes'};
     const plan = planMap[moduloMatch[1].trim().toLowerCase()];
     if (plan) {
       await supabase.from('users').update({plan}).eq('id', user.id);
       const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-      await sendWhatsApp(phone, `✅ Módulo cambiado a *${planNames[plan]}* 💪`);
+      await sendWhatsApp(phone, `✅ Módulo cambiado a *${planNames[plan]}* 💪\n\nEscribe *menu* para continuar`);
     } else {
       await sendWhatsApp(phone, `Módulos disponibles:\n*personal* · *pareja* · *viajes* · *negocio*\n\nEjemplo: _"modulo negocio"_`);
     }
     return;
   }
 
-  // ══════ TAREAS ══════
-  if (/mis\s+tareas?|ver\s+tareas?|tareas?\s+pendientes?|que\s+tengo\s+pendiente|lista\s+de\s+tareas?/i.test(lower)) {
-    const {data:tareas} = await supabase.from('tasks').select('*').eq('user_id',user.id).eq('done',false).order('prioridad').limit(10);
-    if (!tareas||!tareas.length) {
-      await sendWhatsApp(phone, `✅ *Tareas pendientes*\n\n¡No tienes tareas pendientes! 🎉\n\n_Agrega desde la web: milkomercios.in/MiCaja/tareas.html_`);
-    } else {
-      const priIcon = {alta:'🔴',media:'🟡',baja:'🔵'};
-      const lista = tareas.map(t=>`${priIcon[t.prioridad]||'⚪'} ${t.titulo}${t.fecha?' ('+t.fecha+')':''}`).join('\n');
-      await sendWhatsApp(phone, `✅ *Tareas pendientes (${tareas.length})*\n\n${lista}\n\n_Gestiona desde la web: milkomercios.in/MiCaja/tareas.html_`);
-    }
+  // ══════ ATAJOS DIRECTOS — palabras clave sin menú ══════
+  // Mercado
+  if (/^(mi\s+)?(lista\s+(de\s+)?)?mercado$|^mis?\s+compras?$|^lista\s+compras?$/.test(lower)) {
+    await mostrarSubmenu(phone, 'mercado', user); return;
+  }
+  // Tareas
+  if (/^(mis?\s+)?tareas?$|^pendientes?$|^(mis?\s+)?pendientes?$|^lista\s+tareas?$|^que\s+tengo\s+pendiente$/.test(lower)) {
+    await mostrarSubmenu(phone, 'tareas', user); return;
+  }
+  // Servicios
+  if (/^(mis?\s+)?servicios?(\s+publicos?)?$|^vencimientos?$|^pagos?\s+mes$|^servicios?\s+y\s+pagos?$/.test(lower)) {
+    await mostrarSubmenu(phone, 'servicios', user); return;
+  }
+  // Deudas
+  if (/^(mis?\s+)?deudas?$|^ver\s+deudas?$|^estado\s+deudas?$/.test(lower)) {
+    await mostrarSubmenu(phone, 'deudas', user); return;
+  }
+  // Módulos / cambiar módulo
+  if (/^modulos?$|^mi\s+modulo$|^modulo\s+actual$|^en\s+que\s+modulo(\s+estoy)?$|^que\s+modulo(\s+tengo)?$|^cambiar\s+modulo$/.test(lower)) {
+    await mostrarSubmenu(phone, 'modulo', user); return;
+  }
+  // Informes
+  if (/^informes?$|^reportes?$|^ver\s+informe$|^mis?\s+informes?$/.test(lower)) {
+    await mostrarSubmenu(phone, 'informes', user); return;
+  }
+  // Negocio directo
+  if (/^(mi\s+)?negocio$|^comerciantes?$/.test(lower)) {
+    await mostrarSubmenu(phone, 'negocio', user); return;
+  }
+  // Pareja directo
+  if (/^pareja$|^finanzas\s+pareja$|^gastos\s+pareja$/.test(lower)) {
+    await mostrarSubmenu(phone, 'pareja', user); return;
+  }
+  // Viajes directo
+  if (/^viajes?$|^mis?\s+viajes?$/.test(lower)) {
+    await mostrarSubmenu(phone, 'viajes', user); return;
+  }
+  // Métodos de pago directo
+  if (/^(mis?\s+)?(metodos?\s+(de\s+)?pago|llaves?|datos?\s+(de\s+)?pago|nequi|bancol|daviplata)$/.test(lower)) {
+    await mostrarSubmenu(phone, 'pagos', user); return;
+  }
+
+  // ══════ MENÚ PRINCIPAL ══════
+  const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio','inicio menu','volver','volver al menu'].includes(lower);
+  if (esMenu) {
+    await clearCtx();
+    await enviarMenuPrincipal(phone, user);
+    await setCtx({ step: 'menu_principal' });
     return;
   }
 
-  // ══════ LISTA DE MERCADO ══════
-  if (/mi\s+(?:lista\s+de\s+)?mercado|lista\s+(?:del\s+)?mercado|que\s+necesito\s+comprar|mis\s+compras?|lista\s+compras?/i.test(lower)) {
-    const {data:items} = await supabase.from('mercado').select('*').eq('user_id',user.id).eq('done',false).order('created_at',{ascending:false}).limit(15);
-    if (!items||!items.length) {
-      await sendWhatsApp(phone, `🛒 *Lista de mercado*\n\n¡Tu lista está vacía! 🎉\n\n_Agrega productos desde la web: milkomercios.in/MiCaja/mercado.html_`);
-    } else {
-      const porCat = {};
-      items.forEach(i=>{const c=i.categoria||'Otros';porCat[c]=(porCat[c]||[]).concat(i);});
-      let msg = `🛒 *Lista de mercado (${items.length} productos)*\n\n`;
-      Object.keys(porCat).forEach(cat=>{
-        msg += `*${cat}*\n`;
-        porCat[cat].forEach(i=>{ msg += `  ☐ ${i.nombre}${i.cantidad?' ('+i.cantidad+')':''}\n`; });
-        msg += '\n';
-      });
-      msg += `_Marca como comprado en: milkomercios.in/MiCaja/mercado.html_`;
-      await sendWhatsApp(phone, msg);
-    }
-    return;
-  }
-
-  // ══════ SERVICIOS PÚBLICOS ══════
-  if (/mis\s+servicios?|servicios?\s+publicos?|cuales\s+son\s+mis\s+servicios?|vencimientos?|que\s+vence|pagos?\s+pendientes?\s+(?:del\s+)?mes/i.test(lower)) {
-    const {data:servs} = await supabase.from('servicios').select('*').eq('user_id',user.id).order('dia');
-    if (!servs||!servs.length) {
-      await sendWhatsApp(phone, `🔔 *Servicios*\n\nNo tienes servicios configurados.\n\n_Configura desde la web: milkomercios.in/MiCaja/servicios.html_`);
-      return;
-    }
-    const hoy = new Date(); hoy.setHours(0,0,0,0);
-    const diaHoy = hoy.getDate();
-    let vencidos=[], proximos=[], resto=[];
-    servs.forEach(s=>{
-      if(s.pagado_mes){resto.push(s);return;}
-      const diff = s.dia - diaHoy;
-      if(diff < 0) vencidos.push({s,diff});
-      else if(diff <= 5) proximos.push({s,diff});
-      else resto.push(s);
-    });
-    let msg = `🔔 *Mis servicios y pagos*\n\n`;
-    if(vencidos.length){
-      msg += `*⚠️ VENCIDOS (${vencidos.length}):*\n`;
-      vencidos.forEach(({s,diff})=>{ msg += `  ${s.icono} ${s.nombre} — venció hace ${Math.abs(diff)} día${Math.abs(diff)!==1?'s':''}\n`; });
-      msg += '\n';
-    }
-    if(proximos.length){
-      msg += `*📅 PRÓXIMOS (${proximos.length}):*\n`;
-      proximos.forEach(({s,diff})=>{ msg += `  ${s.icono} ${s.nombre} — ${diff===0?'HOY':'en '+diff+' día'+(diff!==1?'s':'')}\n`; });
-      msg += '\n';
-    }
-    const pagados = servs.filter(s=>s.pagado_mes);
-    if(pagados.length) msg += `*✅ Pagados este mes (${pagados.length}):*\n${pagados.map(s=>`  ${s.icono} ${s.nombre}`).join('\n')}\n\n`;
-    msg += `_Gestiona en: milkomercios.in/MiCaja/servicios.html_`;
-    await sendWhatsApp(phone, msg);
-    return;
-  }
-
-  // ══════ DEUDAS ══════
-  if (/mis\s+deudas?|ver\s+deudas?|cuanto\s+(?:me\s+)?debo|estado\s+deudas?|deudas?\s+pendientes?|quien(?:es)?\s+me\s+deben?|a\s+quien(?:es)?\s+(?:le\s+)?debo/i.test(lower)) {
-    const {data:deudas} = await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid');
-    if (!deudas||!deudas.length) {
-      await sendWhatsApp(phone, `💸 *Deudas*\n\n¡No tienes deudas activas! 🎉\n\n_Registra desde la web: milkomercios.in/MiCaja/deudas.html_`);
-      return;
-    }
-    const meDeben = deudas.filter(d=>d.type==='me_deben');
-    const yoDebo = deudas.filter(d=>d.type==='debo');
-    const totalMD = meDeben.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
-    const totalYD = yoDebo.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
-    let msg = `💸 *Estado de deudas*\n\n`;
-    msg += `💰 *Me deben:* $${totalMD.toLocaleString()}\n`;
-    msg += `💳 *Yo debo:* $${totalYD.toLocaleString()}\n`;
-    msg += `${totalMD>=totalYD?'✅':'⚠️'} *Balance:* ${totalMD>=totalYD?'+':''}$${(totalMD-totalYD).toLocaleString()}\n\n`;
-    if(meDeben.length){
-      msg += `*Me deben (${meDeben.length}):*\n`;
-      meDeben.forEach(d=>{const p=Number(d.amount)-(Number(d.paid)||0);msg+=`  👤 ${d.person_name}: $${p.toLocaleString()}\n`;});
-      msg += '\n';
-    }
-    if(yoDebo.length){
-      msg += `*Yo debo (${yoDebo.length}):*\n`;
-      yoDebo.forEach(d=>{const p=Number(d.amount)-(Number(d.paid)||0);msg+=`  👤 ${d.person_name}: $${p.toLocaleString()}\n`;});
-      msg += '\n';
-    }
-    msg += `_Gestiona en: milkomercios.in/MiCaja/deudas.html_`;
-    await sendWhatsApp(phone, msg);
-    return;
-  }
-
-  // ══════ MÉTODOS DE PAGO ══════
-  if (/mi\s+nequi|mi\s+bancol|mi\s+daviplata|mi\s+banco|mis\s+datos?\s+(?:de\s+)?pago|mis\s+llaves?|como\s+me\s+pagan|datos?\s+(?:para\s+)?transferencia|mi\s+cuenta|mi\s+numero\s+(?:de\s+)?cuenta|mis\s+metodos?\s+(?:de\s+)?pago/i.test(lower)) {
-    const {data:cfg} = await supabase.from('user_configs').select('*').eq('user_id',user.id).single();
-    const nequi = cfg?.nequi;
-    const bancol = cfg?.bancolombia;
-    const daviplata = cfg?.daviplata;
-    const otro = cfg?.otro_pago;
-    if (!nequi && !bancol && !daviplata && !otro) {
-      await sendWhatsApp(phone,
-        `💳 *Métodos de pago*\n\n` +
-        `No tienes datos de pago guardados.\n\n` +
-        `Para guardarlos escribe:\n` +
-        `_"mi nequi es 3001234567"_\n` +
-        `_"mi bancolombia es 12345678901 tipo ahorros"_\n` +
-        `_"mi daviplata es 3001234567"_`
-      );
-    } else {
-      let msg = `💳 *Tus datos de pago*\n\n`;
-      if(nequi) msg += `📱 *Nequi:* ${nequi}\n`;
-      if(daviplata) msg += `📱 *Daviplata:* ${daviplata}\n`;
-      if(bancol) msg += `🏦 *Bancolombia:* ${bancol}\n`;
-      if(otro) msg += `💰 *Otro:* ${otro}\n`;
-      msg += `\n_Actualiza en: milkomercios.in/MiCaja_`;
-      await sendWhatsApp(phone, msg);
-    }
-    return;
-  }
-
-  // ══════ GUARDAR MÉTODOS DE PAGO ══════
-  const nequiMatch = lower.match(/mi\s+nequi\s+(?:es\s+|:?\s*)([\d\s]+)/i);
-  const bancolMatch = lower.match(/mi\s+bancol(?:ombia)?\s+(?:es\s+|:?\s*)([\d\s]+)/i);
-  const daviMatch = lower.match(/mi\s+daviplata\s+(?:es\s+|:?\s*)([\d\s]+)/i);
-  const otroMatch = lower.match(/mi\s+(?:otro\s+)?pago\s+(?:es\s+|:?\s*)(.+)/i);
-  if (nequiMatch||bancolMatch||daviMatch||otroMatch) {
-    const updates = {};
-    if(nequiMatch) updates.nequi = nequiMatch[1].trim().replace(/\s+/g,'');
-    if(bancolMatch) updates.bancolombia = bancolMatch[1].trim().replace(/\s+/g,'');
-    if(daviMatch) updates.daviplata = daviMatch[1].trim().replace(/\s+/g,'');
-    if(otroMatch) updates.otro_pago = otroMatch[1].trim();
-    updates.user_id = user.id;
-    await supabase.from('user_configs').upsert(updates, {onConflict:'user_id'});
-    const tipo = nequiMatch?'Nequi':bancolMatch?'Bancolombia':daviMatch?'Daviplata':'Método de pago';
-    const valor = (nequiMatch||bancolMatch||daviMatch||otroMatch)[1].trim();
-    await sendWhatsApp(phone, `✅ *${tipo} guardado*\n\n📱 ${valor}\n\n_Escribe "mis datos de pago" para verlos_`);
-    return;
-  }
-  if (lower.startsWith('mi nombre es ') || lower.startsWith('me llamo ')) {
-    const name = text.replace(/^(mi nombre es |me llamo )/i, '').trim();
-    if (name) { await supabase.from('users').update({ name }).eq('id', user.id); await sendWhatsApp(phone, `Mucho gusto *${name}* 😊`); }
-    return;
-  }
-
-  // ══════ NAVEGACION DESDE MENU PRINCIPAL ══════
+  // ══════ NAVEGACIÓN DESDE MENÚ PRINCIPAL ══════
   if (ctx.step === 'menu_principal') {
     const menuMap = {
-      '1':'personal','finanzas':'personal','finanzas personales':'personal','mis finanzas':'personal',
-      '2':'negocio','negocio':'negocio','mi negocio':'negocio','comerciantes':'negocio',
-      '3':'pareja','pareja':'pareja','parejas':'pareja','finanzas pareja':'pareja',
-      '4':'viajes','viajes':'viajes','viaje':'viajes',
-      '5':'deudas','deudas':'deudas','mis deudas':'deudas',
-      '6':'pagos','metodos de pago':'pagos','mis pagos':'pagos','nequi':'pagos','mis llaves':'pagos',
-      '7':'mercado','mercado':'mercado','lista mercado':'mercado','mi mercado':'mercado',
-      '8':'tareas','tareas':'tareas','mis tareas':'tareas',
-      '9':'servicios','servicios':'servicios','mis servicios':'servicios','servicios publicos':'servicios',
-      '10':'informes','informes':'informes','informe':'informes','reportes':'informes'
+      '1':'negocio',   'negocio':'negocio',    'mi negocio':'negocio',
+      '2':'pareja',    'pareja':'pareja',       'parejas':'pareja',        'finanzas pareja':'pareja',
+      '3':'viajes',    'viajes':'viajes',       'viaje':'viajes',
+      '4':'personal',  'personal':'personal',   'finanzas':'personal',     'mis finanzas':'personal',
+      '5':'deudas',    'deudas':'deudas',       'mis deudas':'deudas',
+      '6':'pagos',     'metodos de pago':'pagos','mis pagos':'pagos',      'nequi':'pagos',
+      '7':'mercado',   'mercado':'mercado',     'lista mercado':'mercado', 'mi mercado':'mercado',
+      '8':'tareas',    'tareas':'tareas',       'mis tareas':'tareas',
+      '9':'informes',  'informes':'informes',   'informe':'informes',      'reportes':'informes',
     };
     const dest = menuMap[lower];
     if (dest) {
       await mostrarSubmenu(phone, dest, user);
     } else {
-      await sendWhatsApp(phone, `Elige una opcion del *1* al *10* o escribe el nombre del modulo\n\nEscribe *menu* para ver las opciones`);
+      await sendWhatsApp(phone, `Elige una opción del *1* al *9*\n\nEscribe *menu* para ver las opciones`);
     }
     return;
   }
 
-  // ══════ SUBMENUS DIRECTOS (sin estar en menu_principal) ══════
-  if (/^mercado$|^mi mercado$|^lista mercado$|^lista de mercado$|^mis compras?$/.test(lower)) {
-    await mostrarSubmenu(phone, 'mercado', user); return;
-  }
-  if (/^tareas?$|^mis tareas?$|^pendientes?$|^mis pendientes?$|^lista tareas?$/.test(lower)) {
-    await mostrarSubmenu(phone, 'tareas', user); return;
-  }
-  if (/^servicios?$|^mis servicios?$|^servicios? publicos?$|^vencimientos?$/.test(lower)) {
-    await mostrarSubmenu(phone, 'servicios', user); return;
-  }
-  if (/^modulos?$|^mi modulo$|^modulo actual$|^en que modulo estoy$|^que modulo tengo$/.test(lower)) {
-    await mostrarSubmenu(phone, 'modulo', user); return;
-  }
-
-  // ══════ NAVEGACION DENTRO DE SUBMENÚ ══════
+  // ══════ NAVEGACIÓN DENTRO DE SUBMENÚ ══════
   if (ctx.step && ctx.step.startsWith('sub_')) {
     const submenuActual = ctx.step.replace('sub_','');
-    if (['0','volver','atras','menu','salir','back'].includes(lower)) {
+    if (['0','volver','atras','menu','salir','back','inicio'].includes(lower)) {
       await clearCtx();
-      const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-      await sendWhatsApp(phone,
-        `🤖 *MiCaja — Menu principal*\n` +
-        `Modulo activo: *${planNames[user.plan]}*\n\n` +
-        `*1* 💰 Finanzas personales\n` +
-        `*2* 🏪 Mi negocio\n` +
-        `*3* 💑 Pareja\n` +
-        `*4* ✈️ Viajes\n` +
-        `*5* 💸 Deudas\n` +
-        `*6* 💳 Metodos de pago\n` +
-        `*7* 🛒 Lista de mercado\n` +
-        `*8* ✅ Tareas\n` +
-        `*9* 🔔 Servicios y pagos\n` +
-        `*10* 📊 Informes\n\n` +
-        `Escribe el numero o el nombre del modulo`
-      );
+      await enviarMenuPrincipal(phone, user);
       await setCtx({ step: 'menu_principal' });
       return;
     }
-    await manejarSubmenu(phone, submenuActual, lower, user, ctx);
+    await manejarSubmenu(phone, submenuActual, lower, text, user, ctx);
     return;
   }
 
-  // ══════ INFORME / PDF ══════
+  // ══════ INFORME ══════
   if (['informe','pdf','reporte','informe del mes','mi informe','ver informe'].includes(lower) || /informe\s*(del\s*)?(mes|semana|año|ano|todo)/i.test(lower)) {
-    const module = user.plan || 'personal';
-    const planNames = {personal:'Finanzas Personales',parejas:'Finanzas en Pareja',viajes:'Viajes',comerciantes:'Mi Negocio'};
-    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', module).order('date',{ascending:false});
-    const inc = (movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
-    const exp = (movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
-    const bal = inc - exp;
-    const byCat = {};
-    (movs||[]).filter(m=>m.type==='expense').forEach(m=>{byCat[m.category]=(byCat[m.category]||0)+Number(m.amount);});
-    const topCats = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,v])=>`  • ${c}: $${v.toLocaleString()}`).join('\n');
-    try {
-      const fecha = new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
-      const html = generarHTMLInforme(movs||[], planNames[module], fecha, user.name);
-      const token = crypto.randomBytes(16).toString('hex');
-      await supabase.from('temp_files').insert({token, content: html, filename:`informe-${module}.html`, expires_at: new Date(Date.now()+24*60*60*1000).toISOString()});
-      const link = `https://micaja-backend-production.up.railway.app/api/download/${token}`;
-      await sendWhatsApp(phone,
-        `📄 *Informe ${planNames[module]}*\n` +
-        `━━━━━━━━━━━━━━\n` +
-        `💵 Ingresos: *$${inc.toLocaleString()}*\n` +
-        `💸 Gastos: *$${exp.toLocaleString()}*\n` +
-        `${bal>=0?'✅':'⚠️'} Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}*\n` +
-        `━━━━━━━━━━━━━━\n` +
-        (topCats?`📂 *Top gastos:*\n${topCats}\n━━━━━━━━━━━━━━\n`:'')+
-        `📥 *Descarga el informe completo:*\n${link}\n` +
-        `_Disponible 24 horas_`
-      );
-    } catch(e) {
-      await sendWhatsApp(phone, `📄 *Informe ${planNames[module]}*\n━━━━━━━━━━━━━━\n💵 $${inc.toLocaleString()} ingresos\n💸 $${exp.toLocaleString()} gastos\n${bal>=0?'✅':'⚠️'} $${bal.toLocaleString()} balance\n━━━━━━━━━━━━━━\n${topCats||'Sin movimientos'}\n\n🌐 milkomercios.in/MiCaja/${module}.html`);
-    }
+    await generarYEnviarPDF(phone, user, user.plan);
     return;
   }
 
   // ══════ RESUMEN / BALANCE ══════
-  if (['resumen','cuánto llevo','cuanto llevo','balance','cómo voy','como voy','estado','saldo'].includes(lower)) {
-    const module = user.plan || 'personal';
-    const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', module);
-    const inc = (movs||[]).filter(m => m.type==='income').reduce((s,m) => s+Number(m.amount), 0);
-    const exp = (movs||[]).filter(m => m.type==='expense').reduce((s,m) => s+Number(m.amount), 0);
-    const bal = inc - exp;
-    if (!(movs||[]).length) { await sendWhatsApp(phone, `Aún no tienes movimientos 📭\n\nEscribe _"pagué luz 80mil"_ para empezar.`); return; }
-    const byCat = {};
-    (movs||[]).filter(m => m.type==='expense').forEach(m => { byCat[m.category] = (byCat[m.category]||0) + Number(m.amount); });
-    const topCats = Object.entries(byCat).sort((a,b) => b[1]-a[1]).slice(0,3).map(([cat,amt]) => `  • ${cat}: $${amt.toLocaleString()}`).join('\n');
-    const last3 = (movs||[]).sort((a,b) => new Date(b.created_at)-new Date(a.created_at)).slice(0,3).map(m => `  ${m.type==='income'?'💵':'💸'} ${m.description}: $${Number(m.amount).toLocaleString()}`).join('\n');
-    await sendWhatsApp(phone, `📊 *Resumen de ${user.name||'tu cuenta'}*\n\n💵 Ingresos: *$${inc.toLocaleString()}*\n💸 Gastos: *$${exp.toLocaleString()}*\n${bal>=0?'✅':'⚠️'} Balance: *$${bal.toLocaleString()}*\n📋 ${(movs||[]).length} movimientos\n\n${topCats?`📂 *Top gastos:*\n${topCats}\n\n`:''}🕐 *Recientes:*\n${last3}\n\n${inc>0?`Ahorrando el *${Math.round((bal/inc)*100)}%* 👏`:''}`);
+  if (['resumen','balance','como voy','cuanto llevo','estado','saldo'].includes(lower)) {
+    await enviarResumen(phone, user, user.plan);
     return;
   }
 
   // ══════ DEUDAS RÁPIDAS ══════
-  if (['mis deudas','deudas','qué debo','que debo','cuánto debo','cuanto debo','me deben'].includes(lower)) {
-    try {
-      const { data: debts } = await supabase.from('debts').select('*').eq('user_id', user.id).eq('status', 'pending').or('status.eq.partial');
-      const debo = (debts||[]).filter(d => d.type==='debo');
-      const meDeben = (debts||[]).filter(d => d.type==='me_deben');
-      const totalDebo = debo.reduce((s,d) => s+Number(d.amount)-Number(d.paid||0), 0);
-      const totalMeDeben = meDeben.reduce((s,d) => s+Number(d.amount)-Number(d.paid||0), 0);
-      let msg = `🤝 *Mis Deudas*\n\n💸 Yo debo: *$${totalDebo.toLocaleString()}*\n💵 Me deben: *$${totalMeDeben.toLocaleString()}*\n⚖️ Balance: *${totalMeDeben-totalDebo>=0?'+':''}$${(totalMeDeben-totalDebo).toLocaleString()}*\n\n`;
-      if (debo.length) { msg += `📋 *Lo que debo:*\n`; debo.slice(0,5).forEach(d => { msg += `  • ${d.person_name}: $${(Number(d.amount)-Number(d.paid||0)).toLocaleString()}\n`; }); }
-      if (meDeben.length) { msg += `\n📋 *Lo que me deben:*\n`; meDeben.slice(0,5).forEach(d => { msg += `  • ${d.person_name}: $${(Number(d.amount)-Number(d.paid||0)).toLocaleString()}\n`; }); }
-      msg += `\n🌐 milkomercios.in/MiCaja/deudas.html`;
-      await sendWhatsApp(phone, msg);
-    } catch(e) { await sendWhatsApp(phone, `🌐 Ver deudas: milkomercios.in/MiCaja/deudas.html`); }
-    return;
-  }
-
-  // ══════ REGISTRAR DEUDAS RÁPIDAS ══════
   const deboMatch = lower.match(/(?:le debo|debo)\s+(\d+[\d.,]*\s*(?:mil|k|m)?)\s+(?:a|le a)?\s*(.+)/i);
   const meDebenMatch = lower.match(/(.+)\s+me debe\s+(\d+[\d.,]*\s*(?:mil|k|m)?)/i);
   if (deboMatch) {
-    const amountRaw = deboMatch[1]; const persona = deboMatch[2].trim();
-    const amount = parseFloat(amountRaw.replace(/mil|k/i,'').replace(/[.,]/g,'')) * (amountRaw.match(/mil|k/i) ? 1000 : 1);
+    const amount = parsearMonto(deboMatch[1]);
+    const persona = deboMatch[2].trim();
     await supabase.from('debts').insert({ user_id: user.id, type: 'debo', person_name: persona, amount, status: 'pending', paid: 0 });
-    await sendWhatsApp(phone, `💸 Le debes *$${amount.toLocaleString()}* a *${persona}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
+    await sendWhatsApp(phone, `💸 Le debes *$${amount.toLocaleString()}* a *${persona}*\n\nEscribe _"deudas"_ para ver el estado.`);
     return;
   }
   if (meDebenMatch) {
-    const persona = meDebenMatch[1].trim(); const amountRaw = meDebenMatch[2];
-    const amount = parseFloat(amountRaw.replace(/mil|k/i,'').replace(/[.,]/g,'')) * (amountRaw.match(/mil|k/i) ? 1000 : 1);
+    const persona = meDebenMatch[1].trim();
+    const amount = parsearMonto(meDebenMatch[2]);
     await supabase.from('debts').insert({ user_id: user.id, type: 'me_deben', person_name: persona, amount, status: 'pending', paid: 0 });
-    await sendWhatsApp(phone, `💵 *${persona}* te debe *$${amount.toLocaleString()}*\n\nEscribe _"mis deudas"_ para ver el resumen.`);
+    await sendWhatsApp(phone, `💵 *${persona}* te debe *$${amount.toLocaleString()}*\n\nEscribe _"deudas"_ para ver el estado.`);
     return;
   }
 
   // ══════ LINK WEB ══════
-  const webCmds = ['web','link','portal','dashboard','login','entrar','ingresar','acceder','mi cuenta','acceso web','entrar a la web'];
+  const webCmds = ['web','link','portal','dashboard','login','entrar','ingresar','acceder','mi cuenta','acceso web'];
   if (webCmds.includes(lower) || webCmds.some(c => lower.includes(c))) {
     try {
       const magicToken = crypto.randomBytes(20).toString('hex');
-      const expiresAt = Date.now() + 10 * 60 * 1000;
-      await supabase.from('users').update({
-        magic_token: magicToken,
-        magic_token_expiry: expiresAt
-      }).eq('id', user.id);
-      const link = `https://milkomercios.in/MiCaja/login.html?magic=${magicToken}`;
-      await sendWhatsApp(phone,
-        `🔐 *Tu acceso directo a MiCaja:*\n\n` +
-        `👉 ${link}\n\n` +
-        `⏱ _Este link expira en 10 minutos y es de un solo uso._\n` +
-        `_Nadie más puede usarlo — es solo tuyo._`
-      );
+      await supabase.from('users').update({ magic_token: magicToken, magic_token_expiry: Date.now() + 10*60*1000 }).eq('id', user.id);
+      await sendWhatsApp(phone, `🔐 *Tu acceso directo a MiCaja:*\n\n👉 https://milkomercios.in/MiCaja/login.html?magic=${magicToken}\n\n⏱ _Expira en 10 minutos, un solo uso._`);
     } catch(e) {
       await sendWhatsApp(phone, `🌐 milkomercios.in/MiCaja/login.html\n\n📱 ${phone}\n🔐 PIN: ${user.pin}`);
     }
     return;
   }
 
-  // ══════ PAGAR SUSCRIPCIÓN ══════
-  if (['pagar','suscripción','suscripcion','renovar','activar'].includes(lower)) {
-    try {
-      const linkRes = await axios.get(`https://micaja-backend-production.up.railway.app/api/payments/link/${phone}`);
-      if (linkRes.data.ok) await sendWhatsApp(phone, `💳 *Suscripción MiCaja — $20.000 COP/mes*\n\n👇 Paga aquí:\n${linkRes.data.url}\n\n⏱ _El link expira en 30 minutos_`);
-    } catch(e) { await sendWhatsApp(phone, `💳 Pagar: milkomercios.in/MiCaja/dashboard.html`); }
-    return;
-  }
-
   // ══════ BORRAR ÚLTIMO ══════
-  if (['borrar último','borrar ultimo','borrar','deshacer'].includes(lower)) {
-    const { data: last } = await supabase.from('movements').select('id,description,amount,type,category').eq('user_id', user.id).eq('module', user.plan).order('created_at',{ascending:false}).limit(1).single();
+  if (['borrar ultimo','borrar último','borrar','deshacer'].includes(lower)) {
+    const { data: last } = await supabase.from('movements').select('id,description,amount,type').eq('user_id', user.id).eq('module', user.plan).order('created_at',{ascending:false}).limit(1).single();
     if (last) {
       await supabase.from('movements').delete().eq('id', last.id);
       await sendWhatsApp(phone, `🗑 Borré: ${last.type==='income'?'💵':'💸'} *${last.description}* — $${Number(last.amount).toLocaleString()}`);
@@ -1490,58 +1219,47 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ VER ÚLTIMOS MOVIMIENTOS ══════
-  if (['últimos','ultimos','mis movimientos','ver movimientos'].includes(lower)) {
+  // ══════ VER ÚLTIMOS ══════
+  if (['ultimos','últimos','mis movimientos','ver movimientos'].includes(lower)) {
     const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', user.plan).order('created_at',{ascending:false}).limit(5);
-    if (!movs || !movs.length) { await sendWhatsApp(phone, `No tienes movimientos aún 📭`); return; }
+    if (!movs||!movs.length) { await sendWhatsApp(phone, `No tienes movimientos aún 📭`); return; }
     const lista = movs.map((m,i) => `${i+1}. ${m.type==='income'?'💵':'💸'} ${m.description} — $${Number(m.amount).toLocaleString()}\n   📂 ${m.category} · ${m.date}`).join('\n\n');
     await sendWhatsApp(phone, `🕐 *Últimos 5 movimientos:*\n\n${lista}`);
     return;
   }
 
-  // ══════ CONFIRMACIÓN DE CATEGORÍA ══════
+  // ══════ CONFIRMACIÓN CATEGORÍA ══════
   if (ctx.step === 'confirm_cat') {
-    const cats = {
-      '1':'Alimentación','2':'Arriendo','3':'Servicios','4':'Transporte',
-      '5':'Salud','6':'Entretenimiento','7':'Educación','8':'Nómina',
-      '9':'Proveedores','10':'Créditos','11':'Ventas','12':'Otros'
-    };
-    if (lower === 'cancelar' || lower === 'no' || lower === 'cancel') {
+    const cats = {'1':'Alimentación','2':'Arriendo','3':'Servicios','4':'Transporte','5':'Salud','6':'Entretenimiento','7':'Educación','8':'Nómina','9':'Proveedores','10':'Créditos','11':'Ventas','12':'Otros'};
+    if (['cancelar','no','cancel'].includes(lower)) {
       await clearCtx();
-      await sendWhatsApp(phone, `❌ Cancelado. No se guardó nada.\n\nCuando quieras escríbeme de nuevo 😊`);
+      await sendWhatsApp(phone, `❌ Cancelado.\n\nEscríbeme cuando quieras 😊`);
       return;
     }
-    const useCat = cats[lower] ||
-      (Object.values(cats).find(c => c.toLowerCase() === lower)) ||
+    const useCat = cats[lower] || Object.values(cats).find(c => c.toLowerCase() === lower) ||
       (['si','sí','ok','listo','dale','correcto','exacto','eso','así','asi','guardalo','guardar'].includes(lower) ? ctx.category : null);
     if (useCat) {
       const { error } = await supabase.from('movements').insert({
         user_id: user.id, type: ctx.type, amount: ctx.amount,
         description: ctx.description, category: useCat,
         source: 'whatsapp', module: user.plan
-      }).select().single();
+      });
+      await clearCtx();
       if (!error) {
-        await clearCtx();
-        const { data: movs } = await supabase.from('movements').select('type, amount')
-          .eq('user_id', user.id).eq('module', user.plan);
+        const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', user.plan);
         const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
-        const signo = ctx.type === 'income' ? '+' : '-';
-        const emoji = ctx.type === 'income' ? '💵' : '💸';
         await sendWhatsApp(phone,
           `✅ *${ctx.type==='income'?'Ingreso':'Gasto'} guardado*\n\n` +
-          `${emoji} ${ctx.description}\n` +
-          `💰 ${signo}$${Number(ctx.amount).toLocaleString()} COP\n` +
+          `${ctx.type==='income'?'💵':'💸'} ${ctx.description}\n` +
+          `💰 ${ctx.type==='income'?'+':'-'}$${Number(ctx.amount).toLocaleString()} COP\n` +
           `📂 ${useCat}\n\n` +
-          `Balance actual: *${bal>=0?'+':''}$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}\n\n` +
-          `_Escribe "cómo voy" para ver tu resumen_`
+          `Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}\n\n` +
+          `_Escribe "como voy" o "menu" para más opciones_`
         );
-      } else {
-        await clearCtx();
-        await sendWhatsApp(phone, `❌ Error al guardar. Intenta de nuevo.`);
-      }
+      } else { await sendWhatsApp(phone, `❌ Error al guardar. Intenta de nuevo.`); }
     } else {
       await sendWhatsApp(phone,
-        `Responde con el número de la categoría:\n\n` +
+        `Responde con el número:\n\n` +
         `*1* Alimentación · *2* Arriendo · *3* Servicios\n` +
         `*4* Transporte · *5* Salud · *6* Entretenimiento\n` +
         `*7* Educación · *8* Nómina · *9* Proveedores\n` +
@@ -1553,40 +1271,731 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ PARSER IA ══════
+  // ══════ GUARDAR MÉTODOS DE PAGO RÁPIDO ══════
+  const nequiMatch  = lower.match(/mi\s+nequi\s+(?:es\s+|:?\s*)([\d\s]+)/i);
+  const bancolMatch = lower.match(/mi\s+bancol(?:ombia)?\s+(?:es\s+|:?\s*)([\d\s]+)/i);
+  const daviMatch   = lower.match(/mi\s+daviplata\s+(?:es\s+|:?\s*)([\d\s]+)/i);
+  if (nequiMatch||bancolMatch||daviMatch) {
+    const updates = { user_id: user.id };
+    if(nequiMatch)  updates.nequi       = nequiMatch[1].trim().replace(/\s+/g,'');
+    if(bancolMatch) updates.bancolombia = bancolMatch[1].trim().replace(/\s+/g,'');
+    if(daviMatch)   updates.daviplata   = daviMatch[1].trim().replace(/\s+/g,'');
+    await supabase.from('user_configs').upsert(updates, {onConflict:'user_id'});
+    const tipo  = nequiMatch?'Nequi':bancolMatch?'Bancolombia':'Daviplata';
+    const valor = (nequiMatch||bancolMatch||daviMatch)[1].trim();
+    await sendWhatsApp(phone, `✅ *${tipo}* guardado: ${valor}\n\nEscribe _"metodos de pago"_ para verlos`);
+    return;
+  }
+
+  // ══════ PARSER IA — registrar movimiento ══════
   const parsed = await parseWithAI(lower, user.name, user.plan);
   if (parsed) {
     const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-    const emoji = parsed.type === 'income' ? '💵' : '💸';
-    const signo = parsed.type === 'income' ? '+' : '-';
     await setCtx({step:'confirm_cat', type:parsed.type, amount:parsed.amount, description:parsed.description, category:parsed.category});
     await sendWhatsApp(phone,
-      `${emoji} *¿Confirmas este ${parsed.type==='income'?'ingreso':'gasto'}?*\n\n` +
+      `${parsed.type==='income'?'💵':'💸'} *¿Confirmas este ${parsed.type==='income'?'ingreso':'gasto'}?*\n\n` +
       `📝 *${parsed.description}*\n` +
-      `💰 ${signo}$${Number(parsed.amount).toLocaleString()} COP\n` +
+      `💰 ${parsed.type==='income'?'+':'-'}$${Number(parsed.amount).toLocaleString()} COP\n` +
       `📂 Categoría: *${parsed.category}*\n` +
       `📋 Módulo: *${planNames[user.plan]}*\n\n` +
-      `✅ *sí* — guardar así\n` +
+      `✅ *sí* — guardar\n` +
       `🔢 *1-12* — cambiar categoría\n` +
       `❌ *no* — cancelar\n\n` +
-      `_Categorías: 1.Alimentación 2.Arriendo 3.Servicios 4.Transporte 5.Salud 6.Entretenimiento 7.Educación 8.Nómina 9.Proveedores 10.Créditos 11.Ventas 12.Otros_`
+      `_1.Alimentación 2.Arriendo 3.Servicios 4.Transporte 5.Salud 6.Entretenimiento 7.Educación 8.Nómina 9.Proveedores 10.Créditos 11.Ventas 12.Otros_`
     );
     return;
   }
 
-  await sendWhatsApp(phone, `Mmm, no entendí bien 🤔\n\nPrueba así:\n💸 _"pagué arriendo 800mil"_\n💵 _"me cayó el sueldo 2 millones"_\n💵 _"vendí mercancía 500k"_\n\nO escribe *menu* para ver todo 😊`);
+  await sendWhatsApp(phone, `Mmm, no entendí bien 🤔\n\nPrueba así:\n💸 _"pagué arriendo 800mil"_\n💵 _"me cayó el sueldo 2 millones"_\n\nO escribe *menu* para ver todo 😊`);
 }
 
-// ══════ BUSCAR USUARIO ══════
-app.get('/api/user/phone/:phone', async (req, res) => {
-  try {
-    const { data: user } = await supabase.from('users').select('id, name, phone, plan, role, status, created_at').eq('phone', req.params.phone).single();
-    if (!user) return res.status(404).json({ error: 'No encontrado' });
-    res.json({ ok: true, user });
-  } catch (err) { res.status(500).json({ error: 'Error' }); }
-});
+// ══════════════════════════════════════
+// MENÚ PRINCIPAL — helper reutilizable
+// ══════════════════════════════════════
+async function enviarMenuPrincipal(phone, user) {
+  const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+  await sendWhatsApp(phone,
+    `🤖 *MiCaja — Menú principal*\n` +
+    `Módulo activo: *${planNames[user.plan]}*\n\n` +
+    `*1* 🏪 Mi negocio — ventas y gastos del negocio\n` +
+    `*2* 💑 Pareja — gastos compartidos con tu pareja\n` +
+    `*3* ✈️ Viajes — gastos de un viaje grupal\n` +
+    `*4* 👤 Personal — finanzas personales del día a día\n` +
+    `*5* 💸 Deudas — lo que debes y lo que te deben\n` +
+    `*6* 💳 Métodos de pago — Nequi, Bancolombia, etc\n` +
+    `*7* 🛒 Lista de mercado — productos por comprar\n` +
+    `*8* ✅ Tareas — pendientes y recordatorios\n` +
+    `*9* 📊 Informes — PDF descargable de tus finanzas\n\n` +
+    `Escribe el número o el nombre del módulo`
+  );
+}
 
-// ══════ PARSER CON IA ══════
+// ══════════════════════════════════════
+// RESUMEN — helper reutilizable
+// ══════════════════════════════════════
+async function enviarResumen(phone, user, mod) {
+  const planNames = {personal:'Finanzas Personales',parejas:'Finanzas en Pareja',viajes:'Viajes',comerciantes:'Mi Negocio'};
+  const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', mod);
+  const inc = (movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
+  const exp = (movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
+  const bal = inc - exp;
+  if (!(movs||[]).length) { await sendWhatsApp(phone, `Aún no tienes movimientos en *${planNames[mod]}* 📭\n\nEscribe _"pagué luz 80mil"_ para empezar.`); return; }
+  const byCat = {};
+  (movs||[]).filter(m=>m.type==='expense').forEach(m=>{ byCat[m.category]=(byCat[m.category]||0)+Number(m.amount); });
+  const topCats = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([c,v])=>`  • ${c}: $${v.toLocaleString()}`).join('\n');
+  const last3 = (movs||[]).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,3).map(m=>`  ${m.type==='income'?'💵':'💸'} ${m.description}: $${Number(m.amount).toLocaleString()}`).join('\n');
+  await sendWhatsApp(phone,
+    `📊 *${planNames[mod]}*\n━━━━━━━━━━━━━━\n` +
+    `💵 Ingresos: *$${inc.toLocaleString()}*\n` +
+    `💸 Gastos:   *$${exp.toLocaleString()}*\n` +
+    `${bal>=0?'✅':'⚠️'} Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}*\n` +
+    `📋 ${(movs||[]).length} movimientos\n` +
+    `━━━━━━━━━━━━━━\n` +
+    (topCats?`📂 *Top gastos:*\n${topCats}\n\n`:'')+
+    `🕐 *Recientes:*\n${last3}\n\n` +
+    `_"informe" para PDF · "menu" para más opciones_`
+  );
+}
+
+// ══════════════════════════════════════
+// PDF — helper reutilizable
+// ══════════════════════════════════════
+async function generarYEnviarPDF(phone, user, mod, titulo) {
+  const planNames = {personal:'Finanzas Personales',parejas:'Finanzas en Pareja',viajes:'Viajes',comerciantes:'Mi Negocio'};
+  const tit = titulo || planNames[mod] || 'Informe';
+  const { data: movs } = await supabase.from('movements').select('*').eq('user_id', user.id).eq('module', mod).order('date',{ascending:false});
+  const inc = (movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
+  const exp = (movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
+  const bal = inc - exp;
+  const byCat = {};
+  (movs||[]).filter(m=>m.type==='expense').forEach(m=>{byCat[m.category]=(byCat[m.category]||0)+Number(m.amount);});
+  const topCats = Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,v])=>`  • ${c}: $${v.toLocaleString()}`).join('\n');
+  try {
+    const fecha = new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
+    const html = generarHTMLInforme(movs||[], tit, fecha, user.name);
+    const token = crypto.randomBytes(16).toString('hex');
+    await supabase.from('temp_files').insert({token, content: html, filename:`informe-${mod}.html`, expires_at: new Date(Date.now()+24*60*60*1000).toISOString()});
+    const link = `https://micaja-backend-production.up.railway.app/api/download/${token}`;
+    await sendWhatsApp(phone,
+      `📄 *Informe: ${tit}*\n━━━━━━━━━━━━━━\n` +
+      `💵 Ingresos: *$${inc.toLocaleString()}*\n` +
+      `💸 Gastos:   *$${exp.toLocaleString()}*\n` +
+      `${bal>=0?'✅':'⚠️'} Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}*\n` +
+      (topCats?`━━━━━━━━━━━━━━\n📂 Top gastos:\n${topCats}\n`:'')+
+      `━━━━━━━━━━━━━━\n📥 *Descarga el informe:*\n${link}\n_Disponible 24 horas_\n\n` +
+      `*0* Volver al menú`
+    );
+  } catch(e) {
+    await sendWhatsApp(phone, `📊 *${tit}*\n💵 $${inc.toLocaleString()} ingresos\n💸 $${exp.toLocaleString()} gastos\n${bal>=0?'✅':'⚠️'} $${bal.toLocaleString()} balance\n\nError generando PDF. Intenta de nuevo.`);
+  }
+}
+
+// ══════════════════════════════════════
+// HELPER — parsear monto colombiano
+// ══════════════════════════════════════
+function parsearMonto(raw) {
+  const s = raw.toLowerCase().trim();
+  if (/mil|k/.test(s)) return parseFloat(s.replace(/mil|k/i,'').replace(/[.,]/g,'')) * 1000;
+  if (/millon|millones|palo|palos/.test(s)) return parseFloat(s.replace(/millon.*|palo.*/i,'').replace(/[.,]/g,'')) * 1000000;
+  return parseFloat(s.replace(/[.,]/g,'')) || 0;
+}
+
+// ══════════════════════════════════════
+// MOSTRAR SUBMENU — cada módulo consulta DB y trae datos reales
+// ══════════════════════════════════════
+async function mostrarSubmenu(phone, modulo, user) {
+  await setCtxByPhone(phone, { step: 'sub_' + modulo });
+
+  switch(modulo) {
+
+    // ── NEGOCIO ──────────────────────────────────────────────
+    case 'negocio': {
+      const { data: movs } = await supabase.from('movements').select('type,amount,description,date,category').eq('user_id',user.id).eq('module','comerciantes').order('date',{ascending:false});
+      const inc = (movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
+      const exp = (movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
+      const bal = inc - exp;
+      const last = (movs||[]).slice(0,3).map(m=>`  ${m.type==='income'?'💵':'💸'} ${m.description} $${Number(m.amount).toLocaleString()}`).join('\n');
+      await sendWhatsApp(phone,
+        `🏪 *Mi Negocio*\n━━━━━━━━━━━━━━\n` +
+        `Aquí registras ventas, compras de mercancía,\nnómina y todos los movimientos de tu negocio.\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `💵 Ingresos: *$${inc.toLocaleString()}*\n` +
+        `💸 Gastos:   *$${exp.toLocaleString()}*\n` +
+        `${bal>=0?'✅':'⚠️'} Utilidad: *${bal>=0?'+':''}$${bal.toLocaleString()}*\n` +
+        `📋 ${(movs||[]).length} movimientos\n` +
+        (last?`━━━━━━━━━━━━━━\n🕐 Recientes:\n${last}\n`:``)+
+        `━━━━━━━━━━━━━━\n\n` +
+        `*1* 📊 Ver resumen detallado\n` +
+        `*2* 💸 Registrar gasto del negocio\n` +
+        `*3* 💵 Registrar venta / ingreso\n` +
+        `*4* 🕐 Ver últimos movimientos\n` +
+        `*5* 📄 Descargar informe PDF\n` +
+        `*6* 🔄 Activar módulo negocio\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── PAREJA ────────────────────────────────────────────────
+    case 'pareja': {
+      const { data: movs } = await supabase.from('movements').select('type,amount,description,date,category').eq('user_id',user.id).eq('module','parejas').order('date',{ascending:false});
+      const inc = (movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
+      const exp = (movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
+      const bal = inc - exp;
+      const last = (movs||[]).slice(0,3).map(m=>`  ${m.type==='income'?'💵':'💸'} ${m.description} $${Number(m.amount).toLocaleString()}`).join('\n');
+      await sendWhatsApp(phone,
+        `💑 *Finanzas en Pareja*\n━━━━━━━━━━━━━━\n` +
+        `Registra gastos e ingresos compartidos\ncon tu pareja para llevar las cuentas claras.\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `💵 Ingresos: *$${inc.toLocaleString()}*\n` +
+        `💸 Gastos:   *$${exp.toLocaleString()}*\n` +
+        `${bal>=0?'✅':'⚠️'} Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}*\n` +
+        `📋 ${(movs||[]).length} movimientos\n` +
+        (last?`━━━━━━━━━━━━━━\n🕐 Recientes:\n${last}\n`:``)+
+        `━━━━━━━━━━━━━━\n\n` +
+        `*1* 📊 Ver resumen detallado\n` +
+        `*2* 💸 Registrar gasto de pareja\n` +
+        `*3* 💵 Registrar ingreso compartido\n` +
+        `*4* 🕐 Ver últimos movimientos\n` +
+        `*5* 📄 Descargar informe PDF\n` +
+        `*6* 🔄 Activar módulo pareja\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── PERSONAL ──────────────────────────────────────────────
+    case 'personal': {
+      const { data: movs } = await supabase.from('movements').select('type,amount,description,date,category').eq('user_id',user.id).eq('module','personal').order('date',{ascending:false});
+      const inc = (movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
+      const exp = (movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
+      const bal = inc - exp;
+      const last = (movs||[]).slice(0,3).map(m=>`  ${m.type==='income'?'💵':'💸'} ${m.description} $${Number(m.amount).toLocaleString()}`).join('\n');
+      await sendWhatsApp(phone,
+        `👤 *Finanzas Personales*\n━━━━━━━━━━━━━━\n` +
+        `Controla tus ingresos y gastos del día a día:\narriendo, servicios, mercado, transporte y más.\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `💵 Ingresos: *$${inc.toLocaleString()}*\n` +
+        `💸 Gastos:   *$${exp.toLocaleString()}*\n` +
+        `${bal>=0?'✅':'⚠️'} Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}*\n` +
+        `📋 ${(movs||[]).length} movimientos\n` +
+        (last?`━━━━━━━━━━━━━━\n🕐 Recientes:\n${last}\n`:``)+
+        `━━━━━━━━━━━━━━\n\n` +
+        `*1* 📊 Ver resumen detallado\n` +
+        `*2* 💸 Registrar gasto personal\n` +
+        `*3* 💵 Registrar ingreso personal\n` +
+        `*4* 🕐 Ver últimos movimientos\n` +
+        `*5* 📄 Descargar informe PDF\n` +
+        `*6* 🔄 Activar módulo personal\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── VIAJES ────────────────────────────────────────────────
+    case 'viajes': {
+      const { data: trips } = await supabase.from('trips').select('*,trip_expenses(amount)').eq('user_id',user.id).order('created_at',{ascending:false}).limit(5);
+      const activos = (trips||[]).filter(t=>t.status==='active');
+      const totalGastos = activos[0] ? (activos[0].trip_expenses||[]).reduce((s,e)=>s+Number(e.amount),0) : 0;
+      await sendWhatsApp(phone,
+        `✈️ *Viajes*\n━━━━━━━━━━━━━━\n` +
+        `Divide los gastos del viaje entre el grupo\ny ve quién debe pagarle a quién al final.\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `📋 Total viajes: *${(trips||[]).length}*\n` +
+        `🟢 Activos: *${activos.length}*\n` +
+        (activos[0]?`✈️ Activo: *${activos[0].name}*\n💰 Gastado: *$${totalGastos.toLocaleString()}*\n`:``)+
+        `━━━━━━━━━━━━━━\n\n` +
+        `*1* 📋 Ver mis viajes\n` +
+        `*2* 💰 Ver gastos del viaje activo\n` +
+        `*3* ➕ Crear nuevo viaje\n` +
+        `*4* 📄 Descargar informe PDF\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── DEUDAS ────────────────────────────────────────────────
+    case 'deudas': {
+      const { data: deudas } = await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid');
+      const meDeben = (deudas||[]).filter(d=>d.type==='me_deben');
+      const yoDebo  = (deudas||[]).filter(d=>d.type==='debo');
+      const totalMD = meDeben.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
+      const totalYD = yoDebo.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
+      const listaMD = meDeben.slice(0,3).map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `  👤 ${d.person_name}: $${p.toLocaleString()}`;}).join('\n');
+      const listaYD = yoDebo.slice(0,3).map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `  👤 ${d.person_name}: $${p.toLocaleString()}`;}).join('\n');
+      await sendWhatsApp(phone,
+        `💸 *Deudas*\n━━━━━━━━━━━━━━\n` +
+        `Lleva el control de lo que debes y\nlo que te deben para nunca olvidar nada.\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `💰 Me deben: *$${totalMD.toLocaleString()}* (${meDeben.length} deudas)\n` +
+        `💳 Yo debo:  *$${totalYD.toLocaleString()}* (${yoDebo.length} deudas)\n` +
+        `${totalMD>=totalYD?'✅':'⚠️'} Balance: *${totalMD>=totalYD?'+':''}$${(totalMD-totalYD).toLocaleString()}*\n` +
+        (listaMD?`━━━━━━━━━━━━━━\n💰 Me deben:\n${listaMD}\n`:``)+
+        (listaYD?`💳 Yo debo:\n${listaYD}\n`:``)+
+        `━━━━━━━━━━━━━━\n\n` +
+        `*1* 💰 Ver quién me debe\n` +
+        `*2* 💳 Ver a quién le debo\n` +
+        `*3* ➕ Registrar nueva deuda\n` +
+        `*4* 📄 Descargar informe PDF\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── MÉTODOS DE PAGO ──────────────────────────────────────
+    case 'pagos': {
+      const { data: cfg } = await supabase.from('user_configs').select('*').eq('user_id',user.id).single();
+      const tieneAlgo = cfg?.nequi || cfg?.bancolombia || cfg?.daviplata || cfg?.otro_pago;
+      await sendWhatsApp(phone,
+        `💳 *Métodos de pago*\n━━━━━━━━━━━━━━\n` +
+        `Guarda tus datos para recibir pagos:\nNequi, Bancolombia, Daviplata y más.\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `${cfg?.nequi      ? `📱 Nequi:       *${cfg.nequi}*\n`      : `📱 Nequi:       _no configurado_\n`}` +
+        `${cfg?.daviplata  ? `📱 Daviplata:   *${cfg.daviplata}*\n`  : ``}` +
+        `${cfg?.bancolombia? `🏦 Bancolombia: *${cfg.bancolombia}*\n`: `🏦 Bancolombia: _no configurado_\n`}` +
+        `${cfg?.otro_pago  ? `💰 Otro:        *${cfg.otro_pago}*\n`  : ``}` +
+        `━━━━━━━━━━━━━━\n\n` +
+        `*1* 👁 Ver mis datos\n` +
+        `*2* 📱 Guardar / actualizar Nequi\n` +
+        `*3* 🏦 Guardar / actualizar Bancolombia\n` +
+        `*4* 📱 Guardar / actualizar Daviplata\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── MERCADO ───────────────────────────────────────────────
+    case 'mercado': {
+      const { data: items } = await supabase.from('mercado').select('*').eq('user_id',user.id).eq('done',false).order('categoria');
+      const total = (items||[]).length;
+      const porCat = {};
+      (items||[]).forEach(i=>{ const c=i.categoria||'Otros'; porCat[c]=(porCat[c]||[]).concat(i); });
+      let lista = '';
+      Object.keys(porCat).forEach(cat=>{ lista+=`\n*${cat}:*\n`; porCat[cat].slice(0,5).forEach(i=>{ lista+=`  ☐ ${i.nombre}${i.cantidad?' ('+i.cantidad+')':''}\n`; }); if(porCat[cat].length>5) lista+=`  _...y ${porCat[cat].length-5} más_\n`; });
+      await sendWhatsApp(phone,
+        `🛒 *Lista de mercado (${total} productos)*\n━━━━━━━━━━━━━━\n` +
+        `Tu lista de compras pendientes por categoría.\n` +
+        (total ? lista : `\n🎉 ¡Lista vacía! No hay productos pendientes.\n`)+
+        `━━━━━━━━━━━━━━\n\n` +
+        `*1* 📋 Ver lista completa\n` +
+        `*2* ➕ Agregar producto\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── TAREAS ────────────────────────────────────────────────
+    case 'tareas': {
+      const { data: tareas } = await supabase.from('tasks').select('*').eq('user_id',user.id).eq('done',false).order('created_at',{ascending:false});
+      const total = (tareas||[]).length;
+      const alta  = (tareas||[]).filter(t=>t.prioridad==='alta').length;
+      const priIcon = {alta:'🔴',media:'🟡',baja:'🔵'};
+      let lista = (tareas||[]).slice(0,7).map(t=>`  ${priIcon[t.prioridad]||'⚪'} ${t.titulo}${t.fecha?' ('+t.fecha+')':''}`).join('\n');
+      if(total>7) lista += `\n  _...y ${total-7} más_`;
+      await sendWhatsApp(phone,
+        `✅ *Tareas pendientes (${total})*\n━━━━━━━━━━━━━━\n` +
+        `Tus pendientes y recordatorios ordenados\npor prioridad.\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `🔴 Alta: *${alta}* · Total: *${total}*\n` +
+        (lista ? `\n${lista}\n` : `\n🎉 ¡Sin tareas pendientes!\n`) +
+        `━━━━━━━━━━━━━━\n\n` +
+        `*1* 📋 Ver todas las tareas\n` +
+        `*2* ➕ Agregar tarea\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── SERVICIOS ─────────────────────────────────────────────
+    case 'servicios': {
+      const { data: servs } = await supabase.from('servicios').select('*').eq('user_id',user.id).order('dia');
+      const diaHoy = new Date().getDate();
+      const vencidos = (servs||[]).filter(s=>!s.pagado_mes && s.dia < diaHoy);
+      const proximos = (servs||[]).filter(s=>!s.pagado_mes && s.dia >= diaHoy && s.dia-diaHoy <= 5);
+      const pagados  = (servs||[]).filter(s=>s.pagado_mes);
+      const pendientes = (servs||[]).filter(s=>!s.pagado_mes && s.dia-diaHoy > 5);
+      let lista = '';
+      if(vencidos.length)  lista+=`\n⚠️ *Vencidos (${vencidos.length}):*\n`+vencidos.map(s=>`  ${s.icono} ${s.nombre} — venció día ${s.dia}`).join('\n');
+      if(proximos.length)  lista+=`\n📅 *Próximos ${proximos.length===1?'(hoy)':'(<5 días)'}:*\n`+proximos.map(s=>{const d=s.dia-diaHoy;return `  ${s.icono} ${s.nombre} — ${d===0?'HOY':'en '+d+' día'+(d!==1?'s':'')}`}).join('\n');
+      if(pagados.length)   lista+=`\n✅ *Pagados este mes (${pagados.length}):*\n`+pagados.map(s=>`  ${s.icono} ${s.nombre}`).join('\n');
+      if(pendientes.length)lista+=`\n🟢 *Pendientes:*\n`+pendientes.slice(0,4).map(s=>`  ${s.icono} ${s.nombre} — día ${s.dia}`).join('\n');
+      await sendWhatsApp(phone,
+        `🔔 *Servicios y pagos (${(servs||[]).length})*\n━━━━━━━━━━━━━━\n` +
+        `Tus servicios públicos y pagos del mes\ncon fechas de vencimiento y estado.\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `⚠️ Vencidos: *${vencidos.length}* · 📅 Próximos: *${proximos.length}* · ✅ Pagados: *${pagados.length}*` +
+        (lista || `\n\n🎉 Todo al día!`) +
+        `\n━━━━━━━━━━━━━━\n\n` +
+        `*1* 📋 Ver todos los servicios\n` +
+        `*2* ✅ Marcar servicio como pagado\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── INFORMES ──────────────────────────────────────────────
+    case 'informes': {
+      await sendWhatsApp(phone,
+        `📊 *Informes PDF*\n━━━━━━━━━━━━━━\n` +
+        `Genera informes descargables de tus finanzas,\nigual al diseño de la web. Disponibles 24 horas.\n` +
+        `━━━━━━━━━━━━━━\n\n` +
+        `*1* 📄 Informe del mes actual\n` +
+        `*2* 📄 Histórico completo (módulo activo)\n` +
+        `*3* 📄 Finanzas Personales\n` +
+        `*4* 📄 Mi Negocio\n` +
+        `*5* 📄 Finanzas en Pareja\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+
+    // ── MÓDULO ────────────────────────────────────────────────
+    case 'modulo': {
+      const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+      const actual = planNames[user.plan] || '👤 Personal';
+      await sendWhatsApp(phone,
+        `📋 *Cambiar módulo activo*\n━━━━━━━━━━━━━━\n` +
+        `Módulo actual: *${actual}*\n\n` +
+        `*1* 👤 Personal — finanzas del día a día\n` +
+        `*2* 🏪 Negocio — ventas y gastos del negocio\n` +
+        `*3* 💑 Pareja — gastos compartidos\n` +
+        `*4* ✈️ Viajes — gastos de un viaje\n\n` +
+        `*0* ↩ Volver al menú`
+      );
+      break;
+    }
+  }
+}
+
+// ══════════════════════════════════════
+// MANEJAR OPCIONES DENTRO DE SUBMENÚ
+// ══════════════════════════════════════
+async function manejarSubmenu(phone, modulo, lower, textOriginal, user, ctx) {
+  const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+
+  switch(modulo) {
+
+    // ── NEGOCIO / PAREJA / PERSONAL ───────────────────────────
+    case 'negocio':
+    case 'pareja':
+    case 'personal': {
+      const mod   = modulo==='pareja'?'parejas':modulo==='negocio'?'comerciantes':'personal';
+      const titulo= {negocio:'Mi Negocio',pareja:'Finanzas en Pareja',personal:'Finanzas Personales'}[modulo];
+
+      if (lower==='1') {
+        await enviarResumen(phone, user, mod);
+        await sendWhatsApp(phone, `*5* 📄 PDF | *0* ↩ Menú`);
+
+      } else if (lower==='2') {
+        await setCtxByPhone(phone, {step:`sub_${modulo}`, esperando:'gasto', modulo:mod});
+        await sendWhatsApp(phone, `💸 Escribe el gasto:\n_"pagué mercado 150mil"_\n\n*0* Cancelar`);
+
+      } else if (lower==='3') {
+        await setCtxByPhone(phone, {step:`sub_${modulo}`, esperando:'ingreso', modulo:mod});
+        await sendWhatsApp(phone, `💵 Escribe el ingreso:\n_"me ingresaron 2 millones"_\n\n*0* Cancelar`);
+
+      } else if (lower==='4') {
+        const { data: movs } = await supabase.from('movements').select('*').eq('user_id',user.id).eq('module',mod).order('date',{ascending:false}).limit(8);
+        const lista = (movs||[]).map(m=>`${m.type==='income'?'💵':'💸'} ${m.description} $${Number(m.amount).toLocaleString()} (${m.date})`).join('\n');
+        await sendWhatsApp(phone, `🕐 *Últimos movimientos — ${titulo}*\n━━━━━━━━━━━━━━\n${lista||'Sin movimientos aún'}\n\n*5* 📄 PDF | *0* ↩ Menú`);
+
+      } else if (lower==='5') {
+        await generarYEnviarPDF(phone, user, mod, titulo);
+
+      } else if (lower==='6') {
+        await supabase.from('users').update({plan:mod}).eq('id', user.id);
+        await setCtxByPhone(phone, {});
+        await sendWhatsApp(phone, `✅ Módulo activo: *${planNames[mod]}* 💪\n\nEscribe *menu* para continuar`);
+
+      } else if (ctx.esperando==='gasto' || ctx.esperando==='ingreso') {
+        const parsed = await parseWithAI(lower, user.name, ctx.modulo||user.plan);
+        if (parsed) {
+          await setCtxByPhone(phone, {step:`sub_${modulo}`, step2:'confirm_submenu', type:parsed.type, amount:parsed.amount, description:parsed.description, category:parsed.category, modulo:ctx.modulo||user.plan});
+          await sendWhatsApp(phone, `${parsed.type==='income'?'💵':'💸'} *${parsed.description}*\n$${Number(parsed.amount).toLocaleString()} COP — ${parsed.category}\n\n*sí* guardar | *no* cancelar`);
+        } else {
+          await sendWhatsApp(phone, `No entendí el monto. Escríbelo así:\n_"pagué mercado 50mil"_\n\n*0* Cancelar`);
+        }
+
+      } else if (ctx.step2==='confirm_submenu') {
+        if (['si','sí','ok','dale','listo'].includes(lower)) {
+          await supabase.from('movements').insert({user_id:user.id, type:ctx.type, amount:ctx.amount, description:ctx.description, category:ctx.category, source:'whatsapp', module:ctx.modulo||user.plan});
+          await setCtxByPhone(phone, {step:`sub_${modulo}`});
+          const { data: movs } = await supabase.from('movements').select('type,amount').eq('user_id',user.id).eq('module',ctx.modulo||user.plan);
+          const bal = (movs||[]).reduce((s,m)=>s+(m.type==='income'?Number(m.amount):-Number(m.amount)),0);
+          await sendWhatsApp(phone, `✅ *Guardado!*\n${ctx.type==='income'?'💵':'💸'} ${ctx.description} — $${Number(ctx.amount).toLocaleString()}\nBalance: *${bal>=0?'+':''}$${bal.toLocaleString()}*\n\n*1* Resumen | *5* PDF | *0* Menú`);
+        } else {
+          await setCtxByPhone(phone, {step:`sub_${modulo}`});
+          await sendWhatsApp(phone, `❌ Cancelado.\n\n*0* Menú`);
+        }
+
+      } else {
+        await mostrarSubmenu(phone, modulo, user);
+      }
+      break;
+    }
+
+    // ── VIAJES ────────────────────────────────────────────────
+    case 'viajes': {
+      if (lower==='1') {
+        const { data: trips } = await supabase.from('trips').select('*,trip_expenses(amount)').eq('user_id',user.id).order('created_at',{ascending:false}).limit(10);
+        if (!trips||!trips.length) { await sendWhatsApp(phone, `No tienes viajes registrados.\n\n_Créalos en: milkomercios.in/MiCaja/viajes.html_\n\n*0* Menú`); return; }
+        const lista = trips.map((t,i)=>{
+          const total = (t.trip_expenses||[]).reduce((s,e)=>s+Number(e.amount),0);
+          return `${i+1}. ${t.status==='active'?'🟢':'⚫'} *${t.name}* — $${total.toLocaleString()} (${t.status==='active'?'activo':'finalizado'})`;
+        }).join('\n');
+        await sendWhatsApp(phone, `✈️ *Mis viajes*\n━━━━━━━━━━━━━━\n${lista}\n\n*0* Menú`);
+
+      } else if (lower==='2') {
+        const { data: trips } = await supabase.from('trips').select('*,trip_expenses(*),trip_members(*)').eq('user_id',user.id).eq('status','active').order('created_at',{ascending:false}).limit(1);
+        const trip = trips?.[0];
+        if (!trip) { await sendWhatsApp(phone, `No tienes un viaje activo.\n\n*0* Menú`); return; }
+        const exps = (trip.trip_expenses||[]);
+        const total = exps.reduce((s,e)=>s+Number(e.amount),0);
+        const lista = exps.slice(0,8).map(e=>`  💰 ${e.description}: $${Number(e.amount).toLocaleString()} (${e.payer})`).join('\n');
+        await sendWhatsApp(phone, `✈️ *${trip.name}*\n━━━━━━━━━━━━━━\n💰 Total gastado: *$${total.toLocaleString()}*\n👥 Participantes: *${(trip.trip_members||[]).length}*\n━━━━━━━━━━━━━━\n${lista||'Sin gastos aún'}\n\n*4* PDF | *0* Menú`);
+
+      } else if (lower==='4') {
+        const { data: trips } = await supabase.from('trips').select('*,trip_expenses(*)').eq('user_id',user.id).eq('status','active').order('created_at',{ascending:false}).limit(1);
+        const trip = trips?.[0];
+        const movs = trip ? (trip.trip_expenses||[]).map(e=>({type:'expense',amount:e.amount,description:e.description,category:'Viaje',date:e.expense_date||e.created_at?.split('T')[0]})) : [];
+        await generarYEnviarPDF(phone, user, 'viajes', trip?`Viaje: ${trip.name}`:'Viajes');
+
+      } else {
+        await mostrarSubmenu(phone, 'viajes', user);
+      }
+      break;
+    }
+
+    // ── DEUDAS ────────────────────────────────────────────────
+    case 'deudas': {
+      if (lower==='1') {
+        const { data: d } = await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid').eq('type','me_deben').order('created_at',{ascending:false});
+        if (!d||!d.length) { await sendWhatsApp(phone, `💰 ¡Nadie te debe nada! 🎉\n\n*0* Menú`); return; }
+        const totalMD = d.reduce((s,x)=>s+Number(x.amount)-(Number(x.paid)||0),0);
+        const lista = d.map(x=>{const p=Number(x.amount)-(Number(x.paid)||0);return `👤 *${x.person_name}*: $${p.toLocaleString()}${x.description?' — '+x.description:''}`;}).join('\n');
+        await sendWhatsApp(phone, `💰 *Me deben en total: $${totalMD.toLocaleString()}*\n━━━━━━━━━━━━━━\n${lista}\n\n*4* PDF | *0* Menú`);
+
+      } else if (lower==='2') {
+        const { data: d } = await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid').eq('type','debo').order('created_at',{ascending:false});
+        if (!d||!d.length) { await sendWhatsApp(phone, `💳 ¡No debes nada! 🎉\n\n*0* Menú`); return; }
+        const totalYD = d.reduce((s,x)=>s+Number(x.amount)-(Number(x.paid)||0),0);
+        const lista = d.map(x=>{const p=Number(x.amount)-(Number(x.paid)||0);return `👤 *${x.person_name}*: $${p.toLocaleString()}${x.description?' — '+x.description:''}`;}).join('\n');
+        await sendWhatsApp(phone, `💳 *Yo debo en total: $${totalYD.toLocaleString()}*\n━━━━━━━━━━━━━━\n${lista}\n\n*4* PDF | *0* Menú`);
+
+      } else if (lower==='3') {
+        await setCtxByPhone(phone, {step:'sub_deudas', esperando:'nueva_deuda'});
+        await sendWhatsApp(phone, `Registra la deuda:\n_"le debo 200k a Juan"_\n_"Pedro me debe 500mil"_\n\n*0* Cancelar`);
+
+      } else if (lower==='4') {
+        const { data: deudas } = await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid');
+        const meDeben = (deudas||[]).filter(d=>d.type==='me_deben');
+        const yoDebo  = (deudas||[]).filter(d=>d.type==='debo');
+        const totalMD = meDeben.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
+        const totalYD = yoDebo.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
+        const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Deudas</title><style>body{font-family:Segoe UI,sans-serif;padding:28px;color:#0F172A}h1{font-size:20px;font-weight:800;margin-bottom:3px}.sub{color:#64748B;font-size:12px;margin-bottom:18px}.cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:18px}.card{border-radius:10px;padding:14px;text-align:center}.val{font-size:18px;font-weight:800;margin:4px 0}.lbl{font-size:11px;color:#64748B}.sec h3{font-size:13px;font-weight:700;margin:14px 0 8px;border-bottom:2px solid #E2E8F0;padding-bottom:4px}.row{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #F8FAFC;font-size:11px}.footer{margin-top:20px;font-size:10px;color:#94A3B8;text-align:center;border-top:1px solid #E2E8F0;padding-top:10px}</style></head><body><h1>Deudas</h1><div class="sub">${new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'})} — ${user.name||''}</div><div class="cards"><div class="card" style="background:#ECFDF5;border:1px solid #6EE7B7"><div class="val" style="color:#059669">$${totalMD.toLocaleString()}</div><div class="lbl">Me deben</div></div><div class="card" style="background:#FEF2F2;border:1px solid #FCA5A5"><div class="val" style="color:#EF4444">$${totalYD.toLocaleString()}</div><div class="lbl">Yo debo</div></div><div class="card" style="background:${totalMD>=totalYD?'#EFF6FF':'#FEF2F2'};border:1px solid ${totalMD>=totalYD?'#93C5FD':'#FCA5A5'}"><div class="val" style="color:${totalMD>=totalYD?'#2563EB':'#EF4444'}">${totalMD>=totalYD?'+':''}$${(totalMD-totalYD).toLocaleString()}</div><div class="lbl">Balance</div></div></div><div class="sec"><h3>Me deben</h3>${meDeben.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#059669">$${p.toLocaleString()}</span></div>`;}).join('')||'<p style="color:#94A3B8;font-size:11px">Ninguna</p>'}</div><div class="sec"><h3>Yo debo</h3>${yoDebo.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#EF4444">$${p.toLocaleString()}</span></div>`;}).join('')||'<p style="color:#94A3B8;font-size:11px">Ninguna</p>'}</div><div class="footer">MiCaja — milkomercios.in/MiCaja</div></body></html>`;
+        const token = crypto.randomBytes(16).toString('hex');
+        await supabase.from('temp_files').insert({token, content:html, filename:'deudas.html', expires_at:new Date(Date.now()+24*60*60*1000).toISOString()});
+        await sendWhatsApp(phone, `📄 *Informe Deudas*\n\n📥 https://micaja-backend-production.up.railway.app/api/download/${token}\n_Disponible 24 horas_\n\n*0* Menú`);
+
+      } else if (ctx.esperando==='nueva_deuda') {
+        // Detectar si es "le debo X a Y" o "Y me debe X"
+        const dMatch = lower.match(/(?:le debo|debo)\s+(\S+)\s+a\s+(.+)/i);
+        const mMatch = lower.match(/(.+?)\s+me debe\s+(\S+)/i);
+        if (dMatch) {
+          const amount = parsearMonto(dMatch[1]); const persona = dMatch[2].trim();
+          await supabase.from('debts').insert({user_id:user.id, type:'debo', person_name:persona, amount, status:'pending', paid:0});
+          await setCtxByPhone(phone, {step:'sub_deudas'});
+          await sendWhatsApp(phone, `✅ Registrado: le debes *$${amount.toLocaleString()}* a *${persona}*\n\n*0* Menú`);
+        } else if (mMatch) {
+          const persona = mMatch[1].trim(); const amount = parsearMonto(mMatch[2]);
+          await supabase.from('debts').insert({user_id:user.id, type:'me_deben', person_name:persona, amount, status:'pending', paid:0});
+          await setCtxByPhone(phone, {step:'sub_deudas'});
+          await sendWhatsApp(phone, `✅ Registrado: *${persona}* te debe *$${amount.toLocaleString()}*\n\n*0* Menú`);
+        } else {
+          await sendWhatsApp(phone, `No entendí. Escríbelo así:\n_"le debo 200k a Juan"_\n_"Pedro me debe 500mil"_\n\n*0* Cancelar`);
+        }
+
+      } else {
+        await mostrarSubmenu(phone, 'deudas', user);
+      }
+      break;
+    }
+
+    // ── MÉTODOS DE PAGO ──────────────────────────────────────
+    case 'pagos': {
+      if (lower==='1') {
+        const { data: cfg } = await supabase.from('user_configs').select('*').eq('user_id',user.id).single();
+        await sendWhatsApp(phone,
+          `💳 *Tus datos de pago*\n━━━━━━━━━━━━━━\n` +
+          `${cfg?.nequi      ?`📱 Nequi:       *${cfg.nequi}*\n`      :`📱 Nequi:       _no guardado_\n`}` +
+          `${cfg?.daviplata  ?`📱 Daviplata:   *${cfg.daviplata}*\n`  :``}` +
+          `${cfg?.bancolombia?`🏦 Bancolombia: *${cfg.bancolombia}*\n`:`🏦 Bancolombia: _no guardado_\n`}` +
+          `${cfg?.otro_pago  ?`💰 Otro:        *${cfg.otro_pago}*\n`  :``}\n*0* Menú`
+        );
+      } else if (['2','3','4'].includes(lower)) {
+        const tipoMap  = {'2':'nequi','3':'bancol','4':'daviplata'};
+        const nombreMap= {'2':'Nequi','3':'Bancolombia','4':'Daviplata'};
+        await setCtxByPhone(phone, {step:'sub_pagos', esperando:tipoMap[lower]});
+        await sendWhatsApp(phone, `Escribe tu número de ${nombreMap[lower]}:\n_Ej: 3001234567_\n\n*0* Cancelar`);
+      } else if (ctx.esperando) {
+        const updates = {user_id:user.id};
+        if(ctx.esperando==='nequi')    updates.nequi       = lower.replace(/\s+/g,'');
+        if(ctx.esperando==='bancol')   updates.bancolombia = lower.replace(/\s+/g,'');
+        if(ctx.esperando==='daviplata')updates.daviplata   = lower.replace(/\s+/g,'');
+        await supabase.from('user_configs').upsert(updates, {onConflict:'user_id'});
+        const nombre = {nequi:'Nequi',bancol:'Bancolombia',daviplata:'Daviplata'}[ctx.esperando];
+        await setCtxByPhone(phone, {step:'sub_pagos'});
+        await sendWhatsApp(phone, `✅ *${nombre}* guardado!\n\n*1* Ver datos | *0* Menú`);
+      } else {
+        await mostrarSubmenu(phone, 'pagos', user);
+      }
+      break;
+    }
+
+    // ── MERCADO ───────────────────────────────────────────────
+    case 'mercado': {
+      if (lower==='1') {
+        const { data: items } = await supabase.from('mercado').select('*').eq('user_id',user.id).eq('done',false).order('categoria');
+        if (!items||!items.length) { await sendWhatsApp(phone, `🛒 Lista vacía! 🎉\n\n*0* Menú`); return; }
+        const porCat = {};
+        items.forEach(i=>{ const c=i.categoria||'Otros'; porCat[c]=(porCat[c]||[]).concat(i); });
+        let msg = `🛒 *Lista completa (${items.length})*\n━━━━━━━━━━━━━━\n`;
+        Object.keys(porCat).forEach(cat=>{ msg+=`\n*${cat}:*\n`; porCat[cat].forEach(i=>{ msg+=`  ☐ ${i.nombre}${i.cantidad?' ('+i.cantidad+')':''}\n`; }); });
+        await sendWhatsApp(phone, msg+`\n*0* Menú`);
+
+      } else if (lower==='2') {
+        await setCtxByPhone(phone, {step:'sub_mercado', esperando:'item_mercado'});
+        await sendWhatsApp(phone, `¿Qué producto necesitas?\n_"leche 2 litros"_\n\n*0* Cancelar`);
+
+      } else if (ctx.esperando==='item_mercado') {
+        await supabase.from('mercado').insert({user_id:user.id, nombre:textOriginal.trim(), cantidad:null, categoria:'Otros', done:false});
+        await setCtxByPhone(phone, {step:'sub_mercado'});
+        await sendWhatsApp(phone, `✅ *${textOriginal.trim()}* agregado!\n\n*1* Ver lista | *2* Agregar otro | *0* Menú`);
+
+      } else {
+        await mostrarSubmenu(phone, 'mercado', user);
+      }
+      break;
+    }
+
+    // ── TAREAS ────────────────────────────────────────────────
+    case 'tareas': {
+      if (lower==='1') {
+        const { data: tareas } = await supabase.from('tasks').select('*').eq('user_id',user.id).eq('done',false).order('created_at',{ascending:false});
+        if (!tareas||!tareas.length) { await sendWhatsApp(phone, `✅ Sin tareas pendientes! 🎉\n\n*0* Menú`); return; }
+        const priIcon = {alta:'🔴',media:'🟡',baja:'🔵'};
+        const lista = tareas.map(t=>`${priIcon[t.prioridad]||'⚪'} ${t.titulo}${t.fecha?' ('+t.fecha+')':''}`).join('\n');
+        await sendWhatsApp(phone, `✅ *Todas las tareas (${tareas.length})*\n━━━━━━━━━━━━━━\n${lista}\n\n*0* Menú`);
+
+      } else if (lower==='2') {
+        await setCtxByPhone(phone, {step:'sub_tareas', esperando:'nueva_tarea'});
+        await sendWhatsApp(phone, `Escribe la tarea:\n_"llamar al banco"_\n\n*0* Cancelar`);
+
+      } else if (ctx.esperando==='nueva_tarea') {
+        await supabase.from('tasks').insert({user_id:user.id, titulo:textOriginal.trim(), prioridad:'media', done:false});
+        await setCtxByPhone(phone, {step:'sub_tareas'});
+        await sendWhatsApp(phone, `✅ *${textOriginal.trim()}* agregada!\n\n*1* Ver tareas | *2* Otra | *0* Menú`);
+
+      } else {
+        await mostrarSubmenu(phone, 'tareas', user);
+      }
+      break;
+    }
+
+    // ── SERVICIOS ─────────────────────────────────────────────
+    case 'servicios': {
+      if (lower==='1') {
+        const { data: servs } = await supabase.from('servicios').select('*').eq('user_id',user.id).order('dia');
+        if (!servs||!servs.length) { await sendWhatsApp(phone, `🔔 Sin servicios configurados.\n\nConfigura en: milkomercios.in/MiCaja/servicios.html\n\n*0* Menú`); return; }
+        const diaHoy = new Date().getDate();
+        const lista = servs.map(s=>{
+          if(s.pagado_mes) return `✅ ${s.icono} ${s.nombre}`;
+          const diff = s.dia - diaHoy;
+          if(diff < 0)  return `⚠️ ${s.icono} ${s.nombre} (venció día ${s.dia})`;
+          if(diff === 0)return `🔴 ${s.icono} ${s.nombre} (HOY)`;
+          if(diff <= 3) return `🟡 ${s.icono} ${s.nombre} (en ${diff}d)`;
+          return      `🟢 ${s.icono} ${s.nombre} (día ${s.dia})`;
+        }).join('\n');
+        await sendWhatsApp(phone, `🔔 *Todos los servicios:*\n━━━━━━━━━━━━━━\n${lista}\n\n*0* Menú`);
+
+      } else if (lower==='2') {
+        const { data: servs } = await supabase.from('servicios').select('*').eq('user_id',user.id).eq('pagado_mes',false).order('dia');
+        if (!servs||!servs.length) { await sendWhatsApp(phone, `✅ Todo pagado este mes! 🎉\n\n*0* Menú`); return; }
+        await setCtxByPhone(phone, {step:'sub_servicios', esperando:'marcar_pagado', ids:JSON.stringify(servs.map(s=>s.id))});
+        await sendWhatsApp(phone, `¿Cuál marcas como pagado?\n\n`+servs.map((s,i)=>`*${i+1}* ${s.icono} ${s.nombre}`).join('\n')+`\n\n*0* Cancelar`);
+
+      } else if (ctx.esperando==='marcar_pagado') {
+        const ids = JSON.parse(ctx.ids||'[]');
+        const idx = parseInt(lower)-1;
+        if (idx>=0 && idx<ids.length) {
+          await supabase.from('servicios').update({pagado_mes:true}).eq('id',ids[idx]);
+          await setCtxByPhone(phone, {step:'sub_servicios'});
+          await sendWhatsApp(phone, `✅ Marcado como pagado!\n\n*1* Ver servicios | *0* Menú`);
+        } else {
+          await sendWhatsApp(phone, `Número inválido. Intenta de nuevo.`);
+        }
+
+      } else {
+        await mostrarSubmenu(phone, 'servicios', user);
+      }
+      break;
+    }
+
+    // ── INFORMES ──────────────────────────────────────────────
+    case 'informes': {
+      const config = {
+        '1': { mod: user.plan,       titulo: 'Mes actual',          soloMes: true  },
+        '2': { mod: user.plan,       titulo: 'Histórico completo',  soloMes: false },
+        '3': { mod: 'personal',      titulo: 'Finanzas Personales', soloMes: false },
+        '4': { mod: 'comerciantes',  titulo: 'Mi Negocio',          soloMes: false },
+        '5': { mod: 'parejas',       titulo: 'Finanzas en Pareja',  soloMes: false },
+      };
+      if (config[lower]) {
+        const { mod, titulo, soloMes } = config[lower];
+        let query = supabase.from('movements').select('*').eq('user_id',user.id).eq('module',mod).order('date',{ascending:false});
+        if (soloMes) { const a=new Date(); query=query.gte('date',`${a.getFullYear()}-${String(a.getMonth()+1).padStart(2,'0')}-01`); }
+        const { data: movs } = await query;
+        const inc = (movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
+        const exp = (movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
+        const fecha = new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
+        const html  = generarHTMLInforme(movs||[], titulo, fecha, user.name);
+        const token = crypto.randomBytes(16).toString('hex');
+        await supabase.from('temp_files').insert({token, content:html, filename:`informe.html`, expires_at:new Date(Date.now()+24*60*60*1000).toISOString()});
+        await sendWhatsApp(phone,
+          `📄 *${titulo}*\n━━━━━━━━━━━━━━\n` +
+          `💵 $${inc.toLocaleString()} ingresos\n` +
+          `💸 $${exp.toLocaleString()} gastos\n` +
+          `${(inc-exp)>=0?'✅':'⚠️'} $${(inc-exp).toLocaleString()} balance\n` +
+          `━━━━━━━━━━━━━━\n` +
+          `📥 https://micaja-backend-production.up.railway.app/api/download/${token}\n` +
+          `_Disponible 24 horas_\n\n*0* Menú`
+        );
+      } else {
+        await mostrarSubmenu(phone, 'informes', user);
+      }
+      break;
+    }
+
+    // ── MÓDULO ────────────────────────────────────────────────
+    case 'modulo': {
+      const opMap = {'1':'personal','2':'comerciantes','3':'parejas','4':'viajes'};
+      const plan = opMap[lower];
+      if (plan) {
+        await supabase.from('users').update({plan}).eq('id', user.id);
+        await setCtxByPhone(phone, {});
+        await sendWhatsApp(phone, `✅ Módulo activo: *${planNames[plan]}* 💪\n\nEscribe *menu* para continuar`);
+      } else {
+        await mostrarSubmenu(phone, 'modulo', user);
+      }
+      break;
+    }
+
+    default:
+      await setCtxByPhone(phone, {});
+      await sendWhatsApp(phone, `Escribe *menu* 😊`);
+  }
+}
+
 async function parseWithAI(text, userName, plan) {
   try {
     const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY;
@@ -1695,359 +2104,6 @@ function autoCategory(text, type) {
 // ══════════════════════════════════════
 // SISTEMA DE SUBMENÚS NAVEGABLES
 // ══════════════════════════════════════
-async function mostrarSubmenu(phone, modulo, user) {
-  const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-  // FIX: usar setCtxByPhone directamente — limpio, sin merge
-  await setCtxByPhone(phone, {step:'sub_'+modulo});
-
-  switch(modulo) {
-    case 'personal': case 'negocio': case 'pareja': {
-      const mod = modulo==='pareja'?'parejas':modulo==='negocio'?'comerciantes':modulo;
-      const nombre = {personal:'💰 Finanzas personales',negocio:'🏪 Mi negocio',pareja:'💑 Finanzas pareja'}[modulo];
-      const { data: movs } = await supabase.from('movements').select('type,amount').eq('user_id',user.id).eq('module',mod);
-      const inc=(movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
-      const exp=(movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
-      const bal=inc-exp;
-      await sendWhatsApp(phone,
-        `${nombre}\n━━━━━━━━━━━━━━\n`+
-        `💵 Ingresos: *$${inc.toLocaleString()}*\n`+
-        `💸 Gastos: *$${exp.toLocaleString()}*\n`+
-        `${bal>=0?'✅':'⚠️'} Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}*\n\n`+
-        `Que quieres hacer?\n`+
-        `*1* Ver resumen detallado\n`+
-        `*2* Registrar gasto\n`+
-        `*3* Registrar ingreso\n`+
-        `*4* Ver ultimos movimientos\n`+
-        `*5* 📄 Descargar informe PDF\n`+
-        (modulo!=='personal'?`*6* Cambiar a este modulo\n`:``)+
-        `*0* Volver al menu`
-      );
-      break;
-    }
-    case 'viajes': {
-      const { data: trips } = await supabase.from('trips').select('*').eq('user_id',user.id).order('created_at',{ascending:false}).limit(5);
-      const activos=(trips||[]).filter(t=>t.status==='active');
-      await sendWhatsApp(phone,
-        `✈️ *Viajes*\n━━━━━━━━━━━━━━\n`+
-        `Total: *${(trips||[]).length}* | Activos: *${activos.length}*\n`+
-        (activos.length?`Activo: *${activos[0].name}*\n`:``)+`\n`+
-        `*1* Ver mis viajes\n*2* Ver gastos del viaje activo\n*3* Crear nuevo viaje\n*4* 📄 Informe PDF\n*0* Menu`
-      );
-      break;
-    }
-    case 'deudas': {
-      const { data: deudas } = await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid');
-      const meDeben=(deudas||[]).filter(d=>d.type==='me_deben');
-      const yoDebo=(deudas||[]).filter(d=>d.type==='debo');
-      const totalMD=meDeben.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
-      const totalYD=yoDebo.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
-      await sendWhatsApp(phone,
-        `💸 *Deudas*\n━━━━━━━━━━━━━━\n`+
-        `💰 Me deben: *$${totalMD.toLocaleString()}* (${meDeben.length})\n`+
-        `💳 Yo debo: *$${totalYD.toLocaleString()}* (${yoDebo.length})\n`+
-        `${totalMD>=totalYD?'✅':'⚠️'} Balance: *${totalMD>=totalYD?'+':''}$${(totalMD-totalYD).toLocaleString()}*\n\n`+
-        `*1* Ver quien me debe\n*2* Ver a quien le debo\n*3* Registrar deuda\n*4* 📄 Informe PDF\n*0* Menu`
-      );
-      break;
-aver
-    }
-    case 'pagos': {
-      const { data: cfg } = await supabase.from('user_configs').select('*').eq('user_id',user.id).single();
-      await sendWhatsApp(phone,
-        `💳 *Metodos de pago*\n━━━━━━━━━━━━━━\n`+
-        `${cfg?.nequi?`📱 Nequi: *${cfg.nequi}*\n`:`📱 Nequi: _no configurado_\n`}`+
-        `${cfg?.daviplata?`📱 Daviplata: *${cfg.daviplata}*\n`:``}`+
-        `${cfg?.bancolombia?`🏦 Bancolombia: *${cfg.bancolombia}*\n`:`🏦 Bancolombia: _no configurado_\n`}`+
-        `${cfg?.otro_pago?`💰 Otro: *${cfg.otro_pago}*\n`:``}\n`+
-        `*1* Ver mis datos\n*2* Guardar Nequi\n*3* Guardar Bancolombia\n*4* Guardar Daviplata\n*0* Menu`
-      );
-      break;
-    }
-    case 'mercado': {
-      const { data: items } = await supabase.from('mercado').select('*').eq('user_id',user.id).eq('done',false).order('created_at',{ascending:false});
-      const total=(items||[]).length;
-      const porCat={};
-      (items||[]).forEach(i=>{const c=i.categoria||'Otros';porCat[c]=(porCat[c]||[]).concat(i);});
-      let lista='';
-      Object.keys(porCat).slice(0,3).forEach(cat=>{lista+=`\n*${cat}:*\n`;porCat[cat].slice(0,4).forEach(i=>{lista+=`  ☐ ${i.nombre}${i.cantidad?' ('+i.cantidad+')':''}\n`;});});
-      if(total>12) lista+=`\n_...y ${total-12} mas_`;
-      await sendWhatsApp(phone,
-        `🛒 *Lista de mercado (${total})*\n━━━━━━━━━━━━━━`+
-        (lista||'\n🎉 Lista vacia!')+`\n\n`+
-        `*1* Ver lista completa\n*2* Agregar producto\n*0* Menu`
-      );
-      break;
-    }
-    case 'tareas': {
-      const { data: tareas } = await supabase.from('tasks').select('*').eq('user_id',user.id).eq('done',false).order('created_at',{ascending:false});
-      const total=(tareas||[]).length;
-      const alta=(tareas||[]).filter(t=>t.prioridad==='alta').length;
-      const priIcon={alta:'🔴',media:'🟡',baja:'🔵'};
-      let lista=(tareas||[]).slice(0,6).map(t=>`${priIcon[t.prioridad]||'⚪'} ${t.titulo}${t.fecha?' ('+t.fecha+')':''}`).join('\n');
-      if(total>6) lista+=`\n_...y ${total-6} mas_`;
-      await sendWhatsApp(phone,
-        `✅ *Tareas pendientes (${total})*\n━━━━━━━━━━━━━━\n`+
-        `Alta prioridad: *${alta}*\n\n`+
-        (lista||'🎉 Sin tareas pendientes!')+`\n\n`+
-        `*1* Ver todas\n*2* Agregar tarea\n*0* Menu`
-      );
-      break;
-    }
-    case 'servicios': {
-      const { data: servs } = await supabase.from('servicios').select('*').eq('user_id',user.id).order('dia');
-      const diaHoy=new Date().getDate();
-      const vencidos=(servs||[]).filter(s=>!s.pagado_mes&&s.dia<diaHoy);
-      const proximos=(servs||[]).filter(s=>!s.pagado_mes&&s.dia>=diaHoy&&s.dia-diaHoy<=5);
-      const pagados=(servs||[]).filter(s=>s.pagado_mes);
-      let lista='';
-      if(vencidos.length) lista+=`\n⚠️ *Vencidos:*\n`+vencidos.map(s=>`  ${s.icono} ${s.nombre}`).join('\n');
-      if(proximos.length) lista+=`\n📅 *Proximos:*\n`+proximos.map(s=>`  ${s.icono} ${s.nombre} — dia ${s.dia}`).join('\n');
-      if(pagados.length) lista+=`\n✅ *Pagados:*\n`+pagados.map(s=>`  ${s.icono} ${s.nombre}`).join('\n');
-      await sendWhatsApp(phone,
-        `🔔 *Servicios (${(servs||[]).length})*\n━━━━━━━━━━━━━━\n`+
-        `⚠️ Vencidos: *${vencidos.length}* | 📅 Proximos: *${proximos.length}*`+
-        (lista||'\n🎉 Todo al dia!')+`\n\n`+
-        `*1* Ver todos\n*2* Marcar como pagado\n*0* Menu`
-      );
-      break;
-    }
-    case 'informes': {
-      await sendWhatsApp(phone,
-        `📊 *Informes*\n━━━━━━━━━━━━━━\n`+
-        `*1* 📄 Mes actual\n`+
-        `*2* 📄 Historico completo\n`+
-        `*3* 📄 Finanzas personales\n`+
-        `*4* 📄 Mi negocio\n`+
-        `*5* 📄 Finanzas en pareja\n`+
-        `*0* Menu`
-      );
-      break;
-    }
-    case 'modulo': {
-      const actual=planNames[user.plan]||'👤 Personal';
-      await sendWhatsApp(phone,
-        `📋 *Modulo activo: ${actual}*\n━━━━━━━━━━━━━━\n\n`+
-        `*1* 👤 Personal\n*2* 🏪 Negocio\n*3* 💑 Pareja\n*4* ✈️ Viajes\n\n*0* Menu`
-      );
-      break;
-    }
-  }
-}
-
-async function manejarSubmenu(phone, modulo, lower, user, ctx) {
-  const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-  // helper para acceder al text original desde el contexto de llamada
-  // lower ya viene normalizado, text original lo reconstruimos para insertar
-  const text = lower; // para insertar en DB, usamos lower (ya es texto limpio)
-
-  async function generarPDFModulo(mod, titulo) {
-    const modKey=mod==='pareja'?'parejas':mod==='negocio'?'comerciantes':mod;
-    const {data}=await supabase.from('movements').select('*').eq('user_id',user.id).eq('module',modKey).order('date',{ascending:false});
-    const movs=data||[];
-    const fecha=new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
-    const html=generarHTMLInforme(movs,titulo,fecha,user.name);
-    const token=crypto.randomBytes(16).toString('hex');
-    await supabase.from('temp_files').insert({token,content:html,filename:`informe-${mod}.html`,expires_at:new Date(Date.now()+24*60*60*1000).toISOString()});
-    return `https://micaja-backend-production.up.railway.app/api/download/${token}`;
-  }
-
-  switch(modulo) {
-    case 'personal': case 'negocio': case 'pareja': {
-      const mod=modulo==='pareja'?'parejas':modulo==='negocio'?'comerciantes':modulo;
-      const titulo={personal:'Finanzas Personales',negocio:'Mi Negocio',pareja:'Finanzas en Pareja'}[modulo];
-      if(lower==='1'){
-        const {data:movs}=await supabase.from('movements').select('*').eq('user_id',user.id).eq('module',mod).order('date',{ascending:false});
-        const inc=(movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
-        const exp=(movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
-        const byCat={};
-        (movs||[]).filter(m=>m.type==='expense').forEach(m=>{byCat[m.category]=(byCat[m.category]||0)+Number(m.amount);});
-        const topCats=Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,v])=>`  • ${c}: $${v.toLocaleString()}`).join('\n');
-        await sendWhatsApp(phone,`📊 *${titulo}*\n━━━━━━━━━━━━━━\n💵 $${inc.toLocaleString()} ingresos\n💸 $${exp.toLocaleString()} gastos\n${(inc-exp)>=0?'✅':'⚠️'} $${(inc-exp).toLocaleString()} balance\n📋 ${(movs||[]).length} movimientos\n━━━━━━━━━━━━━━\n${topCats?`📂 Top gastos:\n${topCats}\n`:''}\n*5* PDF | *0* Menu`);
-      } else if(lower==='2'){
-        await setCtxByPhone(phone,{step:`sub_${modulo}`,esperando:'gasto',modulo:mod});
-        await sendWhatsApp(phone,`💸 Escribe el gasto:\n_"pague mercado 150mil"_\n\n*0* Cancelar`);
-      } else if(lower==='3'){
-        await setCtxByPhone(phone,{step:`sub_${modulo}`,esperando:'ingreso',modulo:mod});
-        await sendWhatsApp(phone,`💵 Escribe el ingreso:\n_"me ingresaron 2 millones"_\n\n*0* Cancelar`);
-      } else if(lower==='4'){
-        const {data:movs}=await supabase.from('movements').select('*').eq('user_id',user.id).eq('module',mod).order('date',{ascending:false}).limit(8);
-        const lista=(movs||[]).map(m=>`${m.type==='income'?'💵':'💸'} ${m.description} $${Number(m.amount).toLocaleString()} (${m.date})`).join('\n');
-        await sendWhatsApp(phone,`🕐 *Ultimos movimientos*\n━━━━━━━━━━━━━━\n${lista||'Sin movimientos'}\n\n*5* PDF | *0* Menu`);
-      } else if(lower==='5'){
-        try{ const link=await generarPDFModulo(modulo,titulo); await sendWhatsApp(phone,`📄 *${titulo}*\n\n📥 ${link}\n_24 horas_\n\n*0* Menu`); }
-        catch(e){ await sendWhatsApp(phone,`Error generando PDF.\n\n*0* Menu`); }
-      } else if(lower==='6'&&modulo!=='personal'){
-        await supabase.from('users').update({plan:mod}).eq('id',user.id);
-        await setCtxByPhone(phone,{});
-        await sendWhatsApp(phone,`✅ Modulo: *${planNames[mod]}* 💪\n\nEscribe *menu*`);
-      } else if(ctx.esperando==='gasto'||ctx.esperando==='ingreso'){
-        const parsed=await parseWithAI(lower,user.name,ctx.modulo||user.plan);
-        if(parsed){
-          const modTarget=ctx.modulo||user.plan;
-          await setCtxByPhone(phone,{step:`sub_${modulo}`,step2:'confirm_submenu',type:parsed.type,amount:parsed.amount,description:parsed.description,category:parsed.category,modulo:modTarget});
-          await sendWhatsApp(phone,`${parsed.type==='income'?'💵':'💸'} *${parsed.description}*\n$${Number(parsed.amount).toLocaleString()} COP — ${parsed.category}\n\n*si* guardar | *no* cancelar`);
-        } else { await sendWhatsApp(phone,`No entendi. Escribe el movimiento de nuevo.\n_"pague mercado 50mil"_\n\n*0* Menu`); }
-      } else if(ctx.step2==='confirm_submenu'){
-        if(['si','sí','ok','dale','listo'].includes(lower)){
-          await supabase.from('movements').insert({user_id:user.id,type:ctx.type,amount:ctx.amount,description:ctx.description,category:ctx.category,source:'whatsapp',module:ctx.modulo||user.plan});
-          await setCtxByPhone(phone,{step:`sub_${modulo}`});
-          await sendWhatsApp(phone,`✅ Guardado!\n\n*1* Resumen | *5* PDF | *0* Menu`);
-        } else {
-          await setCtxByPhone(phone,{step:`sub_${modulo}`});
-          await sendWhatsApp(phone,`❌ Cancelado.\n\n*0* Menu`);
-        }
-      } else { await mostrarSubmenu(phone,modulo,user); }
-      break;
-    }
-    case 'deudas': {
-      if(lower==='1'){
-        const {data:d}=await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid').eq('type','me_deben');
-        if(!d||!d.length){await sendWhatsApp(phone,`Nadie te debe! 🎉\n\n*0* Menu`);return;}
-        await sendWhatsApp(phone,`💰 *Me deben:*\n`+d.map(x=>{const p=Number(x.amount)-(Number(x.paid)||0);return `👤 *${x.person_name}*: $${p.toLocaleString()}${x.description?' — '+x.description:''}`;}).join('\n')+`\n\n*4* PDF | *0* Menu`);
-      } else if(lower==='2'){
-        const {data:d}=await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid').eq('type','debo');
-        if(!d||!d.length){await sendWhatsApp(phone,`No debes nada! 🎉\n\n*0* Menu`);return;}
-        await sendWhatsApp(phone,`💳 *Yo debo:*\n`+d.map(x=>{const p=Number(x.amount)-(Number(x.paid)||0);return `👤 *${x.person_name}*: $${p.toLocaleString()}${x.description?' — '+x.description:''}`;}).join('\n')+`\n\n*4* PDF | *0* Menu`);
-      } else if(lower==='3'){
-        await setCtxByPhone(phone,{step:'sub_deudas',esperando:'nueva_deuda'});
-        await sendWhatsApp(phone,`Registra la deuda:\n_"le debo 200k a Juan"_\n_"Pedro me debe 500mil"_\n\n*0* Cancelar`);
-      } else if(lower==='4'){
-        try{
-          const {data:deudas}=await supabase.from('debts').select('*').eq('user_id',user.id).neq('status','paid');
-          const meDeben=(deudas||[]).filter(d=>d.type==='me_deben');
-          const yoDebo=(deudas||[]).filter(d=>d.type==='debo');
-          const totalMD=meDeben.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
-          const totalYD=yoDebo.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
-          const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Deudas</title><style>body{font-family:Segoe UI,sans-serif;padding:28px;color:#0F172A}h1{font-size:20px;font-weight:800;margin-bottom:3px}.sub{color:#64748B;font-size:12px;margin-bottom:18px}.cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:18px}.card{border-radius:10px;padding:14px;text-align:center}.val{font-size:18px;font-weight:800;margin:4px 0}.lbl{font-size:11px;color:#64748B}.sec h3{font-size:13px;font-weight:700;margin:14px 0 8px;border-bottom:2px solid #E2E8F0;padding-bottom:4px}.row{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #F8FAFC;font-size:11px}.footer{margin-top:20px;font-size:10px;color:#94A3B8;text-align:center;border-top:1px solid #E2E8F0;padding-top:10px}</style></head><body><h1>Deudas</h1><div class="sub">${new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'})} — ${user.name||''}</div><div class="cards"><div class="card" style="background:#ECFDF5;border:1px solid #6EE7B7"><div class="val" style="color:#059669">$${totalMD.toLocaleString()}</div><div class="lbl">Me deben</div></div><div class="card" style="background:#FEF2F2;border:1px solid #FCA5A5"><div class="val" style="color:#EF4444">$${totalYD.toLocaleString()}</div><div class="lbl">Yo debo</div></div><div class="card" style="background:${totalMD>=totalYD?'#EFF6FF':'#FEF2F2'};border:1px solid ${totalMD>=totalYD?'#93C5FD':'#FCA5A5'}"><div class="val" style="color:${totalMD>=totalYD?'#2563EB':'#EF4444'}">${totalMD>=totalYD?'+':''}$${(totalMD-totalYD).toLocaleString()}</div><div class="lbl">Balance</div></div></div><div class="sec"><h3>Me deben</h3>${meDeben.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#059669">$${p.toLocaleString()}</span></div>`;}).join('')}</div><div class="sec"><h3>Yo debo</h3>${yoDebo.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#EF4444">$${p.toLocaleString()}</span></div>`;}).join('')}</div><div class="footer">MiCaja — milkomercios.in/MiCaja</div></body></html>`;
-          const token=crypto.randomBytes(16).toString('hex');
-          await supabase.from('temp_files').insert({token,content:html,filename:'deudas.html',expires_at:new Date(Date.now()+24*60*60*1000).toISOString()});
-          await sendWhatsApp(phone,`📄 *Informe Deudas*\n\n📥 https://micaja-backend-production.up.railway.app/api/download/${token}\n_24 horas_\n\n*0* Menu`);
-        }catch(e){await sendWhatsApp(phone,`Error generando PDF.\n\n*0* Menu`);}
-      } else { await mostrarSubmenu(phone,'deudas',user); }
-      break;
-    }
-    case 'pagos': {
-      if(lower==='1'){
-        const {data:cfg}=await supabase.from('user_configs').select('*').eq('user_id',user.id).single();
-        await sendWhatsApp(phone,`💳 *Datos de pago*\n━━━━━━━━━━━━━━\n`+(cfg?.nequi?`📱 Nequi: *${cfg.nequi}*\n`:`📱 Nequi: _no guardado_\n`)+(cfg?.daviplata?`📱 Daviplata: *${cfg.daviplata}*\n`:``)+( cfg?.bancolombia?`🏦 Bancolombia: *${cfg.bancolombia}*\n`:`🏦 Bancolombia: _no guardado_\n`)+(cfg?.otro_pago?`💰 Otro: *${cfg.otro_pago}*\n`:``)+`\n*0* Menu`);
-      } else if(['2','3','4'].includes(lower)){
-        const tipo={'2':'nequi','3':'bancol','4':'daviplata'}[lower];
-        const nombre={'2':'Nequi','3':'Bancolombia','4':'Daviplata'}[lower];
-        await setCtxByPhone(phone,{step:'sub_pagos',esperando:tipo});
-        await sendWhatsApp(phone,`Escribe tu numero de ${nombre}:\n_Ej: 3001234567_\n\n*0* Cancelar`);
-      } else if(ctx.esperando){
-        const updates={user_id:user.id};
-        if(ctx.esperando==='nequi') updates.nequi=lower.replace(/\s+/g,'');
-        if(ctx.esperando==='bancol') updates.bancolombia=lower.replace(/\s+/g,'');
-        if(ctx.esperando==='daviplata') updates.daviplata=lower.replace(/\s+/g,'');
-        await supabase.from('user_configs').upsert(updates,{onConflict:'user_id'});
-        const nombre={'nequi':'Nequi','bancol':'Bancolombia','daviplata':'Daviplata'}[ctx.esperando];
-        await setCtxByPhone(phone,{step:'sub_pagos'});
-        await sendWhatsApp(phone,`✅ *${nombre}* guardado!\n\n*1* Ver datos | *0* Menu`);
-      } else { await mostrarSubmenu(phone,'pagos',user); }
-      break;
-    }
-    case 'mercado': {
-      if(lower==='1'){
-        const {data:items}=await supabase.from('mercado').select('*').eq('user_id',user.id).eq('done',false).order('categoria');
-        if(!items||!items.length){await sendWhatsApp(phone,`Lista vacia! 🎉\n\n*0* Menu`);return;}
-        const porCat={};
-        items.forEach(i=>{const c=i.categoria||'Otros';porCat[c]=(porCat[c]||[]).concat(i);});
-        let msg=`🛒 *Lista completa (${items.length})*\n━━━━━━━━━━━━━━\n`;
-        Object.keys(porCat).forEach(cat=>{msg+=`\n*${cat}:*\n`;porCat[cat].forEach(i=>{msg+=`  ☐ ${i.nombre}${i.cantidad?' ('+i.cantidad+')':''}\n`;});});
-        await sendWhatsApp(phone,msg+`\n*0* Menu`);
-      } else if(lower==='2'){
-        await setCtxByPhone(phone,{step:'sub_mercado',esperando:'item_mercado'});
-        await sendWhatsApp(phone,`Que producto necesitas?\n_"leche 2 litros"_\n\n*0* Cancelar`);
-      } else if(ctx.esperando==='item_mercado'){
-        await supabase.from('mercado').insert({user_id:user.id,nombre:lower.trim(),cantidad:null,categoria:'Otros',done:false});
-        await setCtxByPhone(phone,{step:'sub_mercado'});
-        await sendWhatsApp(phone,`✅ *${lower.trim()}* agregado!\n\n*1* Ver lista | *2* Agregar otro | *0* Menu`);
-      } else { await mostrarSubmenu(phone,'mercado',user); }
-      break;
-    }
-    case 'tareas': {
-      if(lower==='1'){
-        const {data:tareas}=await supabase.from('tasks').select('*').eq('user_id',user.id).eq('done',false).order('created_at',{ascending:false});
-        if(!tareas||!tareas.length){await sendWhatsApp(phone,`Sin tareas pendientes! 🎉\n\n*0* Menu`);return;}
-        const priIcon={alta:'🔴',media:'🟡',baja:'🔵'};
-        await sendWhatsApp(phone,`✅ *Tareas (${tareas.length})*\n━━━━━━━━━━━━━━\n`+tareas.map(t=>`${priIcon[t.prioridad]||'⚪'} ${t.titulo}${t.fecha?' ('+t.fecha+')':''}`).join('\n')+`\n\n*0* Menu`);
-      } else if(lower==='2'){
-        await setCtxByPhone(phone,{step:'sub_tareas',esperando:'nueva_tarea'});
-        await sendWhatsApp(phone,`Escribe la tarea:\n_"llamar al banco"_\n\n*0* Cancelar`);
-      } else if(ctx.esperando==='nueva_tarea'){
-        await supabase.from('tasks').insert({user_id:user.id,titulo:lower.trim(),prioridad:'media',done:false});
-        await setCtxByPhone(phone,{step:'sub_tareas'});
-        await sendWhatsApp(phone,`✅ *${lower.trim()}* agregada!\n\n*1* Ver tareas | *2* Otra | *0* Menu`);
-      } else { await mostrarSubmenu(phone,'tareas',user); }
-      break;
-    }
-    case 'servicios': {
-      if(lower==='1'){
-        const {data:servs}=await supabase.from('servicios').select('*').eq('user_id',user.id).order('dia');
-        if(!servs||!servs.length){await sendWhatsApp(phone,`Sin servicios configurados.\n\nmilkomercios.in/MiCaja/servicios.html\n\n*0* Menu`);return;}
-        const diaHoy=new Date().getDate();
-        await sendWhatsApp(phone,`🔔 *Todos los servicios:*\n━━━━━━━━━━━━━━\n`+servs.map(s=>{
-          if(s.pagado_mes)return `✅ ${s.icono} ${s.nombre}`;
-          const diff=s.dia-diaHoy;
-          if(diff<0)return `⚠️ ${s.icono} ${s.nombre} (vencido ${Math.abs(diff)}d)`;
-          if(diff===0)return `🔴 ${s.icono} ${s.nombre} (HOY)`;
-          if(diff<=3)return `🟡 ${s.icono} ${s.nombre} (en ${diff}d)`;
-          return `🟢 ${s.icono} ${s.nombre} (dia ${s.dia})`;
-        }).join('\n')+`\n\n*0* Menu`);
-      } else if(lower==='2'){
-        const {data:servs}=await supabase.from('servicios').select('*').eq('user_id',user.id).eq('pagado_mes',false).order('dia');
-        if(!servs||!servs.length){await sendWhatsApp(phone,`Todo pagado! ✅\n\n*0* Menu`);return;}
-        await setCtxByPhone(phone,{step:'sub_servicios',esperando:'marcar_pagado',ids:JSON.stringify(servs.map(s=>s.id))});
-        await sendWhatsApp(phone,`Cual marcas como pagado?\n\n`+servs.map((s,i)=>`*${i+1}* ${s.icono} ${s.nombre}`).join('\n')+`\n\n*0* Cancelar`);
-      } else if(ctx.esperando==='marcar_pagado'){
-        const ids=JSON.parse(ctx.ids||'[]');
-        const idx=parseInt(lower)-1;
-        if(idx>=0&&idx<ids.length){
-          await supabase.from('servicios').update({pagado_mes:true}).eq('id',ids[idx]);
-          await setCtxByPhone(phone,{step:'sub_servicios'});
-          await sendWhatsApp(phone,`✅ Marcado como pagado!\n\n*1* Ver servicios | *0* Menu`);
-        } else { await sendWhatsApp(phone,`Numero invalido. Intenta de nuevo.`); }
-      } else { await mostrarSubmenu(phone,'servicios',user); }
-      break;
-    }
-    case 'informes': {
-      const modMap={'1':user.plan,'2':user.plan,'3':'personal','4':'comerciantes','5':'parejas'};
-      const titulos={'1':'Mes actual','2':'Historico completo','3':'Finanzas Personales','4':'Mi Negocio','5':'Finanzas en Pareja'};
-      if(modMap[lower]){
-        try{
-          const mod=modMap[lower];
-          let query=supabase.from('movements').select('*').eq('user_id',user.id).eq('module',mod).order('date',{ascending:false});
-          if(lower==='1'){const a=new Date();const d=`${a.getFullYear()}-${String(a.getMonth()+1).padStart(2,'0')}-01`;query=query.gte('date',d);}
-          const {data:movs}=await query;
-          const fecha=new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'});
-          const html=generarHTMLInforme(movs||[],titulos[lower],fecha,user.name);
-          const token=crypto.randomBytes(16).toString('hex');
-          await supabase.from('temp_files').insert({token,content:html,filename:`informe.html`,expires_at:new Date(Date.now()+24*60*60*1000).toISOString()});
-          const inc=(movs||[]).filter(m=>m.type==='income').reduce((s,m)=>s+Number(m.amount),0);
-          const exp=(movs||[]).filter(m=>m.type==='expense').reduce((s,m)=>s+Number(m.amount),0);
-          await sendWhatsApp(phone,`📄 *${titulos[lower]}*\n💵 $${inc.toLocaleString()} | 💸 $${exp.toLocaleString()}\n${(inc-exp)>=0?'✅':'⚠️'} $${(inc-exp).toLocaleString()}\n\n📥 https://micaja-backend-production.up.railway.app/api/download/${token}\n_24 horas_\n\n*0* Menu`);
-        }catch(e){await sendWhatsApp(phone,`Error. Intenta de nuevo.\n\n*0* Menu`);}
-      } else { await mostrarSubmenu(phone,'informes',user); }
-      break;
-    }
-    case 'modulo': {
-      const opMap={'1':'personal','2':'comerciantes','3':'parejas','4':'viajes'};
-      const plan=opMap[lower];
-      if(plan){
-        await supabase.from('users').update({plan}).eq('id',user.id);
-        await setCtxByPhone(phone,{});
-        await sendWhatsApp(phone,`✅ Modulo: *${planNames[plan]}* 💪\n\nEscribe *menu* para continuar`);
-      } else { await mostrarSubmenu(phone,'modulo',user); }
-      break;
-    }
-    default:
-      await setCtxByPhone(phone,{});
-      await sendWhatsApp(phone,`Escribe *menu* 😊`);
-  }
-}
-
-// ══════ GENERADOR DE INFORME HTML UNIFICADO ══════
 function generarHTMLInforme(movs, titulo, periodo, userName) {
   const COLORS_EXP = ['#EF4444','#DC2626','#F87171','#FCA5A5','#B91C1C','#991B1B'];
   const COLORS_INC = ['#25D366','#059669','#34D399','#3B82F6','#8B5CF6','#F59E0B'];
