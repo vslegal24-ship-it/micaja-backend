@@ -646,14 +646,17 @@ app.post('/api/trips/recordatorio', async (req, res) => {
       `⚠️ Saldo pendiente: *$${pendiente.toLocaleString()} COP*\n━━━━━━━━━━━━━━━━\n\n` +
       `*${to_name}* puso ese dinero de su bolsillo por ti durante el viaje.\n\n` +
       `_Para quitarte de estos recordatorios, pídele a *${to_name}* que marque la deuda como pagada en MiCaja._ 😊\n\n` +
-      `_MiCaja · https://milkomercios.in/MiCaja/MiCaja.html_`;
+      `_MiCaja · https://milkomercios.in/MiCaja/MiCaja.html
+
+🤖 _¿Quieres llevar tus finanzas así de fácil?_
+👉 Únete gratis: https://milkomercios.in/MiCaja/MiCaja.html_`;
 
     const { data: registrado } = await supabase.from('users').select('id').eq('phone', finalPhone).single();
     if (registrado) {
       await sendWhatsApp(finalPhone, msg);
       if (sender_phone) await sendWhatsApp(sender_phone, `✅ Recordatorio enviado a *${from_name}*\n💸 Saldo: $${pendiente.toLocaleString()} COP\n✈️ Viaje: *${trip_name}*`);
     } else {
-      if (sender_phone) await sendWhatsApp(sender_phone, `⚠️ *${from_name}* no tiene cuenta en MiCaja.\n\n📋 *Reenvíale manualmente:*\n\n` + msg);
+      if (sender_phone) await sendWhatsApp(sender_phone, `⚠️ *${from_name}* no tiene cuenta en MiCaja.\n\n📋 *Reenvíale manualmente:*\n\n` + msg + `\n\n🤖 _Invítalo a unirse gratis:_\n👉 ${LANDING}`);
     }
     res.json({ ok: true, direct: !!registrado });
   } catch (err) { res.status(500).json({ error: 'Error al enviar recordatorio' }); }
@@ -706,7 +709,10 @@ app.post('/api/trips/:id/finalizar', async (req, res) => {
       if (myDebts.length) { msg += `💸 *Debes pagarle a:*\n`; myDebts.forEach(d => { msg += `  • ${d.to}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
       if (myCredits.length) { msg += `💵 *Te deben pagarte:*\n`; myCredits.forEach(d => { msg += `  • ${d.from}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
       if (!myDebts.length && !myCredits.length) msg += `✅ ¡Estás al día!\n\n`;
-      msg += `_Enviado desde MiCaja · https://milkomercios.in/MiCaja/MiCaja.html_`;
+      msg += `_Enviado desde MiCaja · https://milkomercios.in/MiCaja/MiCaja.html
+
+🤖 _¿Quieres llevar tus finanzas así de fácil?_
+👉 Únete gratis: https://milkomercios.in/MiCaja/MiCaja.html_`;
       if (registrado) {
         await sendWhatsApp(finalPhone, msg);
         phonesSent.push(member.name);
@@ -903,7 +909,7 @@ app.post('/api/trips/:id/presupuesto', async (req, res) => {
       const phone = mp.phone.replace(/[\s\-\+\(\)]/g,'').replace(/^0/,'');
       const finalPhone = phone.startsWith('57') ? phone : '57'+phone;
       const catLines = (categories||[]).map(c => `  • ${c.name}: $${Number(c.amount).toLocaleString()} COP`).join('\n');
-      const msg = `📋 *Presupuesto estimado — ${trip_name}*\n\nHola *${mp.name}*! 👋\n\n💰 *Por persona: $${Number(budget_per_person).toLocaleString()} COP*\n\n${catLines ? `📊 *Desglose:*\n${catLines}\n\n` : ''}💸 Total grupo (${members.length} personas): *$${total.toLocaleString()} COP*\n\n_Presupuesto estimado — los gastos reales se registrarán en MiCaja._ ✈️`;
+      const msg = `📋 *Presupuesto estimado — ${trip_name}*\n\nHola *${mp.name}*! 👋\n\n💰 *Por persona: $${Number(budget_per_person).toLocaleString()} COP*\n\n${catLines ? `📊 *Desglose:*\n${catLines}\n\n` : ''}💸 Total grupo (${members.length} personas): *$${total.toLocaleString()} COP*\n\n_Presupuesto estimado — los gastos reales se registrarán en MiCaja._ ✈️\n\n🤖 _¿Quieres unirte? Regístrate gratis:_\n👉 https://milkomercios.in/MiCaja/MiCaja.html`;
       await sendWhatsApp(finalPhone, msg);
       sent.push(mp.name);
     }
@@ -1040,7 +1046,7 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
   if (!user) {
-    await sendWhatsApp(phone, `👋 ¡Hola! Soy *MiCajaBot* 🤖\n\nEscribe *registrarme* y te ayudo a crear tu cuenta en 30 segundos 🚀`);
+    await sendWhatsApp(phone, `👋 ¡Hola! Soy *MiCajaBot* 🤖\n\nEscribe *registrarme* y te ayudo a crear tu cuenta en 30 segundos 🚀\n\n👉 https://milkomercios.in/MiCaja/MiCaja.html`);
     return;
   }
 
