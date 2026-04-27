@@ -953,36 +953,52 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ══════════════════════════════════════
-// FUNCIÓN GLOBAL DE SESIÓN — única fuente de verdad
-// FIX v2.2: siempre upsert por phone, nunca merge con estado viejo
+// SESIONES — cache en memoria + Supabase como backup
+// El cache en memoria resuelve la race condition cuando el usuario
+// responde más rápido que el write de Supabase (problema principal)
 // ══════════════════════════════════════
+const sessionCache = new Map(); // { phone: { ctx, ts } }
+
 async function setCtxByPhone(phone, newCtx) {
-  await supabase.from('wa_sessions').upsert(
+  // 1. Guardar en cache local INMEDIATAMENTE (sin await)
+  sessionCache.set(phone, { ctx: newCtx, ts: Date.now() });
+  // 2. Persistir en Supabase en paralelo (no bloqueante)
+  supabase.from('wa_sessions').upsert(
     { phone, context: JSON.stringify(newCtx), updated_at: new Date().toISOString() },
     { onConflict: 'phone' }
-  );
+  ).then(() => {}).catch(() => {});
 }
 
 async function getCtxByPhone(phone) {
-  const { data: session } = await supabase.from('wa_sessions').select('context, updated_at').eq('phone', phone).single();
-  if (!session || !session.context) return {};
+  // 1. Primero buscar en cache local (instantáneo, sin latencia DB)
+  const cached = sessionCache.get(phone);
+  if (cached) {
+    const age = Date.now() - cached.ts;
+    // Cache válido por 2 horas
+    if (age < 2 * 60 * 60 * 1000) {
+      return cached.ctx || {};
+    }
+    sessionCache.delete(phone);
+  }
+
+  // 2. Si no hay cache, buscar en Supabase
   try {
+    const { data: session } = await supabase.from('wa_sessions')
+      .select('context, updated_at').eq('phone', phone).single();
+    if (!session || !session.context) return {};
     const ctx = JSON.parse(session.context);
-    // Ctx expira según el tipo de paso:
-    // - menu_principal: 2 horas (el usuario puede demorar en responder)
-    // - confirm_cat: 30 min (confirmación de gasto no debe quedar colgada)
-    // - sub_*: 1 hora
-    // - otros: 30 min
+    // Expiración por tipo de paso
     if (ctx.step && session.updated_at) {
       const age = Date.now() - new Date(session.updated_at).getTime();
       const timeouts = {
-        'menu_principal': 2 * 60 * 60 * 1000,   // 2 horas
-        'confirm_cat':    30 * 60 * 1000,         // 30 min
+        'menu_principal': 2 * 60 * 60 * 1000,
+        'confirm_cat':    30 * 60 * 1000,
       };
-      const defaultTimeout = ctx.step.startsWith('sub_') ? 60 * 60 * 1000 : 30 * 60 * 1000;
-      const limit = timeouts[ctx.step] || defaultTimeout;
+      const limit = timeouts[ctx.step] || (ctx.step.startsWith('sub_') ? 60 * 60 * 1000 : 30 * 60 * 1000);
       if (age > limit) return {};
     }
+    // Repoblar cache desde DB
+    sessionCache.set(phone, { ctx, ts: Date.now() });
     return ctx;
   } catch { return {}; }
 }
