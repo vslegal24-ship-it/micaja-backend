@@ -2528,6 +2528,39 @@ app.post('/api/payments/regalo', async (req, res) => {
   }
 });
 
+
+// ══════ REVOCAR REGALO (Admin) ══════
+app.delete('/api/payments/regalo/:id', async (req, res) => {
+  try {
+    const adminPhone = req.headers['x-admin-phone'];
+    if (!adminPhone) return res.status(401).json({ error: 'No autorizado' });
+    const { data: adminUser } = await supabase.from('users').select('role').eq('phone', adminPhone).single();
+    if (!adminUser || adminUser.role !== 'admin') return res.status(403).json({ error: 'Solo administradores' });
+
+    // Verificar que el pago es un regalo (no un pago real)
+    const { data: pago } = await supabase.from('payments').select('*, users(phone, name)').eq('id', req.params.id).single();
+    if (!pago) return res.status(404).json({ error: 'Pago no encontrado' });
+    if (pago.method !== 'regalo') return res.status(400).json({ error: 'Solo se pueden revocar regalos, no pagos reales' });
+
+    // Eliminar el pago de regalo
+    await supabase.from('payments').delete().eq('id', req.params.id);
+
+    // Notificar al usuario
+    if (pago.users?.phone && WA_TOKEN) {
+      await sendWhatsApp(pago.users.phone,
+        `ℹ️ *MiCaja — Aviso de cuenta*\n\n` +
+        `Tu acceso de regalo ha sido ajustado por el administrador.\n\n` +
+        `Para continuar usando MiCaja escribe *pagar* o contacta soporte.`
+      ).catch(() => {});
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Revocar regalo error:', err);
+    res.status(500).json({ error: 'Error al revocar regalo' });
+  }
+});
+
 // ══════ INICIAR ══════
 app.listen(PORT, () => {
   console.log(`⚡ MiCaja Backend v2.2 en puerto ${PORT}`);
