@@ -91,7 +91,7 @@ function rateLimitWA(phone, maxPerDay = 150, maxPerMinute = 15) {
 
 // ══════ HEALTH CHECK ══════
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'MiCaja Backend', version: '2.3.1', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'MiCaja Backend', version: '2.2.0', timestamp: new Date().toISOString() });
 });
 
 function normalizePhone(phone) {
@@ -953,16 +953,13 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ══════════════════════════════════════
-// SESIONES — cache en memoria + Supabase como backup
-// El cache en memoria resuelve la race condition cuando el usuario
-// responde más rápido que el write de Supabase (problema principal)
+// SESIONES — cache en memoria + Supabase backup
+// El Map local resuelve race condition de latencia de DB
 // ══════════════════════════════════════
-const sessionCache = new Map(); // { phone: { ctx, ts } }
+const sessionCache = new Map();
 
 async function setCtxByPhone(phone, newCtx) {
-  // 1. Guardar en cache local INMEDIATAMENTE (sin await)
   sessionCache.set(phone, { ctx: newCtx, ts: Date.now() });
-  // 2. Persistir en Supabase en paralelo (no bloqueante)
   supabase.from('wa_sessions').upsert(
     { phone, context: JSON.stringify(newCtx), updated_at: new Date().toISOString() },
     { onConflict: 'phone' }
@@ -970,34 +967,28 @@ async function setCtxByPhone(phone, newCtx) {
 }
 
 async function getCtxByPhone(phone) {
-  // 1. Primero buscar en cache local (instantáneo, sin latencia DB)
   const cached = sessionCache.get(phone);
   if (cached) {
     const age = Date.now() - cached.ts;
-    // Cache válido por 2 horas
-    if (age < 2 * 60 * 60 * 1000) {
-      return cached.ctx || {};
-    }
+    const step = cached.ctx && cached.ctx.step;
+    const limit = step === 'menu_principal' ? 2*60*60*1000 :
+                  step === 'confirm_cat' ? 30*60*1000 :
+                  step && step.startsWith('sub_') ? 60*60*1000 : 30*60*1000;
+    if (age < limit) return cached.ctx || {};
     sessionCache.delete(phone);
   }
-
-  // 2. Si no hay cache, buscar en Supabase
   try {
     const { data: session } = await supabase.from('wa_sessions')
       .select('context, updated_at').eq('phone', phone).single();
     if (!session || !session.context) return {};
     const ctx = JSON.parse(session.context);
-    // Expiración por tipo de paso
     if (ctx.step && session.updated_at) {
       const age = Date.now() - new Date(session.updated_at).getTime();
-      const timeouts = {
-        'menu_principal': 2 * 60 * 60 * 1000,
-        'confirm_cat':    30 * 60 * 1000,
-      };
-      const limit = timeouts[ctx.step] || (ctx.step.startsWith('sub_') ? 60 * 60 * 1000 : 30 * 60 * 1000);
+      const limit = ctx.step === 'menu_principal' ? 2*60*60*1000 :
+                    ctx.step === 'confirm_cat' ? 30*60*1000 :
+                    ctx.step.startsWith('sub_') ? 60*60*1000 : 30*60*1000;
       if (age > limit) return {};
     }
-    // Repoblar cache desde DB
     sessionCache.set(phone, { ctx, ts: Date.now() });
     return ctx;
   } catch { return {}; }
@@ -1060,6 +1051,31 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
+  // ══════ LINK WEB — siempre disponible sin importar el ctx ══════
+  if (/^(web|link|portal|app|aplicacion|aplicación|dashboard|login|acceso|acceso web|ir a la web|abrir app|micaja web)$/.test(lower)) {
+    try {
+      const magicToken = crypto.randomBytes(20).toString('hex');
+      await supabase.from('users').update({ magic_token: magicToken, magic_token_expiry: Date.now() + 10*60*1000 }).eq('id', user.id);
+      await sendWhatsApp(phone,
+        `🔐 *Tu acceso directo a MiCaja:*
+
+` +
+        `👉 https://milkomercios.in/MiCaja/login.html?magic=${magicToken}
+
+` +
+        `⏱ _Expira en 10 minutos, un solo uso._
+` +
+        `_Nadie más puede usarlo — es solo tuyo._`
+      );
+    } catch(e) {
+      await sendWhatsApp(phone, `🌐 milkomercios.in/MiCaja/login.html
+
+📱 ${phone}
+🔐 PIN: ${user.pin}`);
+    }
+    return;
+  }
+
   // ══════ SALUDO ══════
   if (['hola','hi','hey','buenas','buenos dias','buenas tardes','buenas noches','que mas','inicio','start'].includes(lower)) {
     await clearCtx();
@@ -1108,116 +1124,7 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ MENÚ PRINCIPAL ══════
-  const esMenu = ['menu','menues','modulo','modulos','mi modulo','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver al menu'].includes(lower) || /^modulos?$|^mi\s+modulo$|^cambiar\s+modulo$/.test(lower);
-  if (esMenu) {
-    await setCtxByPhone(phone, { step: 'menu_principal' });
-    await enviarMenuPrincipal(phone, user);
-    return;
-  }
-
-  // ══════ NAVEGACIÓN DENTRO DE SUBMENÚ ══════
-  if (ctx.step && ctx.step.startsWith('sub_')) {
-    const submenuActual = ctx.step.replace('sub_','');
-
-    // Volver al menú
-    if (['0','volver','atras','menu','salir','back','inicio'].includes(lower)) {
-      await setCtxByPhone(phone, { step: 'menu_principal' });
-      await enviarMenuPrincipal(phone, user);
-      return;
-    }
-
-    // En módulos financieros (negocio/pareja/personal): si el mensaje no es
-    // un número ni un comando del submenú, tratarlo como movimiento natural
-    const modulosFinancieros = ['negocio','pareja','personal'];
-    if (modulosFinancieros.includes(submenuActual) && !ctx.esperando && !ctx.step2) {
-      // Si NO es número 1-6 ni comando conocido → parsear como gasto/ingreso directamente
-      const esComandoSubmenu = /^[1-6]$/.test(lower) ||
-        ['resumen','pdf','informe','ultimos','últimos','cancelar'].includes(lower);
-      if (!esComandoSubmenu) {
-        // Caer al parser natural — el ctx de submenú se mantiene
-        // así cuando termine de registrar sigue en el módulo
-        const parsed = await parseWithAI(lower, user.name, user.plan);
-        if (parsed) {
-          const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
-          await setCtxByPhone(phone, {
-            step: 'confirm_cat',
-            type: parsed.type, amount: parsed.amount,
-            description: parsed.description, category: parsed.category,
-            returnTo: ctx.step  // recordar a qué submenú volver
-          });
-          await sendWhatsApp(phone,
-            `${parsed.type==='income'?'💵':'💸'} *¿Confirmas este ${parsed.type==='income'?'ingreso':'gasto'}?*
-
-` +
-            `📝 *${parsed.description}*
-` +
-            `💰 ${parsed.type==='income'?'+':'-'}$${Number(parsed.amount).toLocaleString()} COP
-` +
-            `📂 ${parsed.category} · *${planNames[user.plan]}*
-
-` +
-            `✅ *sí* — guardar
-` +
-            `🔢 *1-12* — cambiar categoría
-` +
-            `❌ *no* — cancelar
-
-` +
-            `_1.Alimentación 2.Arriendo 3.Servicios 4.Transporte 5.Salud 6.Entretenimiento 7.Educación 8.Nómina 9.Proveedores 10.Créditos 11.Ventas 12.Otros_`
-          );
-          return;
-        }
-        // Si el parser no entiende, mostrar el submenú de nuevo
-        await sendWhatsApp(phone,
-          `No entendí 🤔
-
-Puedes registrar directamente:
-` +
-          `💸 _"pagué arriendo 800mil"_
-` +
-          `💵 _"me ingresaron 2 millones"_
-
-` +
-          `O elige una opción del menú del módulo:`
-        );
-        await mostrarSubmenu(phone, submenuActual, user);
-        return;
-      }
-    }
-
-    await manejarSubmenu(phone, submenuActual, lower, text, user, ctx);
-    return;
-  }
-
-  // ══════ NAVEGACIÓN DESDE MENÚ PRINCIPAL ══════
-  // Aplica cuando ctx es menu_principal O cuando el mensaje es un número 1-9
-  // (el usuario puede responder rápido antes de que el ctx se guarde en DB)
-  const menuMap = {
-    '1':'negocio',   'negocio':'negocio',    'mi negocio':'negocio',
-    '2':'pareja',    'pareja':'pareja',       'parejas':'pareja',        'finanzas pareja':'pareja',
-    '3':'viajes',    'viajes':'viajes',       'viaje':'viajes',
-    '4':'personal',  'personal':'personal',   'finanzas':'personal',     'mis finanzas':'personal',
-    '5':'deudas',    'deudas':'deudas',       'mis deudas':'deudas',
-    '6':'pagos',     'metodos de pago':'pagos','mis pagos':'pagos',
-    '7':'mercado',   'mercado':'mercado',     'lista mercado':'mercado', 'mi mercado':'mercado',
-    '8':'tareas',    'tareas':'tareas',       'mis tareas':'tareas',
-    '9':'informes',  'informes':'informes',   'informe':'informes',      'reportes':'informes',
-  };
-
-  if (ctx.step === 'menu_principal') {
-    const dest = menuMap[lower];
-    if (dest) {
-      await mostrarSubmenu(phone, dest, user);
-    } else {
-      await sendWhatsApp(phone, `Elige una opción del *1* al *9*\n\nEscribe *menu* para ver las opciones`);
-    }
-    return;
-  }
-
-
-
-  // ══════ ATAJOS DIRECTOS — palabras clave sin menú (solo si NO hay ctx activo) ══════
+  // ══════ ATAJOS DIRECTOS — palabras clave sin menú ══════
   // Mercado
   if (/^(mi\s+)?(lista\s+(de\s+)?)?mercado$|^mis?\s+compras?$|^lista\s+compras?$/.test(lower)) {
     await mostrarSubmenu(phone, 'mercado', user); return;
@@ -1234,7 +1141,7 @@ Puedes registrar directamente:
   if (/^(mis?\s+)?deudas?$|^ver\s+deudas?$|^estado\s+deudas?$/.test(lower)) {
     await mostrarSubmenu(phone, 'deudas', user); return;
   }
-  // Módulos
+  // Módulos / cambiar módulo
   if (/^modulos?$|^mi\s+modulo$|^modulo\s+actual$|^en\s+que\s+modulo(\s+estoy)?$|^que\s+modulo(\s+tengo)?$|^cambiar\s+modulo$/.test(lower)) {
     await mostrarSubmenu(phone, 'modulo', user); return;
   }
@@ -1257,6 +1164,66 @@ Puedes registrar directamente:
   // Métodos de pago directo
   if (/^(mis?\s+)?(metodos?\s+(de\s+)?pago|llaves?|datos?\s+(de\s+)?pago|nequi|bancol|daviplata)$/.test(lower)) {
     await mostrarSubmenu(phone, 'pagos', user); return;
+  }
+
+  // ══════ MENÚ PRINCIPAL ══════
+  const esMenu = ['menu','menues','modulo','modulos','mi modulo','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver al menu'].includes(lower);
+  if (esMenu) {
+    await setCtxByPhone(phone, { step: 'menu_principal' });
+    await enviarMenuPrincipal(phone, user);
+    return;
+  }
+
+  // ══════ NAVEGACIÓN DESDE MENÚ PRINCIPAL ══════
+  if (ctx.step === 'menu_principal') {
+    const menuMap = {
+      '1':'negocio',   'negocio':'negocio',    'mi negocio':'negocio',
+      '2':'pareja',    'pareja':'pareja',       'parejas':'pareja',        'finanzas pareja':'pareja',
+      '3':'viajes',    'viajes':'viajes',       'viaje':'viajes',
+      '4':'personal',  'personal':'personal',   'finanzas':'personal',     'mis finanzas':'personal',
+      '5':'deudas',    'deudas':'deudas',       'mis deudas':'deudas',
+      '6':'pagos',     'metodos de pago':'pagos','mis pagos':'pagos',      'nequi':'pagos',
+      '7':'mercado',   'mercado':'mercado',     'lista mercado':'mercado', 'mi mercado':'mercado',
+      '8':'tareas',    'tareas':'tareas',       'mis tareas':'tareas',
+      '9':'informes',  'informes':'informes',   'informe':'informes',      'reportes':'informes',
+    };
+    const dest = menuMap[lower];
+    if (dest) {
+      await mostrarSubmenu(phone, dest, user);
+    } else {
+      await sendWhatsApp(phone, `Elige una opción del *1* al *9*\n\nEscribe *menu* para ver las opciones`);
+    }
+    return;
+  }
+
+  // ══════ NAVEGACIÓN DENTRO DE SUBMENÚ ══════
+  if (ctx.step && ctx.step.startsWith('sub_')) {
+    const submenuActual = ctx.step.replace('sub_','');
+    if (['0','volver','atras','menu','salir','back','inicio'].includes(lower)) {
+      await setCtxByPhone(phone, { step: 'menu_principal' });
+      await enviarMenuPrincipal(phone, user);
+      return;
+    }
+
+    // Módulos financieros: texto libre → parser directo sin salir del módulo
+    if (['negocio','pareja','personal'].includes(submenuActual) && !ctx.esperando && !ctx.step2) {
+      if (!/^[1-6]$/.test(lower) && !['resumen','pdf','informe','ultimos','cancelar','como voy','saldo'].includes(lower)) {
+        const parsed = await parseWithAI(lower, user.name, user.plan);
+        if (parsed) {
+          const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+          await setCtxByPhone(phone, { step: 'confirm_cat', type: parsed.type, amount: parsed.amount, description: parsed.description, category: parsed.category, returnTo: ctx.step });
+          await sendWhatsApp(phone,
+            `${parsed.type==='income'?'💵':'💸'} *¿Confirmas?*\n\n📝 *${parsed.description}*\n💰 ${parsed.type==='income'?'+':'-'}${Number(parsed.amount).toLocaleString()} COP\n📂 ${parsed.category} · *${planNames[user.plan]}*\n\n✅ *sí* guardar · 🔢 *1-12* cat · ❌ *no* cancelar\n\n_1.Alimentación 2.Arriendo 3.Servicios 4.Transporte 5.Salud 6.Entretenimiento 7.Educación 8.Nómina 9.Proveedores 10.Créditos 11.Ventas 12.Otros_`
+          );
+          return;
+        }
+        await mostrarSubmenu(phone, submenuActual, user);
+        return;
+      }
+    }
+
+    await manejarSubmenu(phone, submenuActual, lower, text, user, ctx);
+    return;
   }
 
   // ══════ INFORME ══════
@@ -1289,32 +1256,7 @@ Puedes registrar directamente:
     return;
   }
 
-  // ══════ LINK WEB ══════
-  // ══════ LINK WEB — sinónimos exactos para no interferir con el parser ══════
-  const esLinkWeb = /^(web|link|portal|app|aplicacion|aplicación|dashboard|login|acceso|acceso web|acceso directo|ir a la web|abrir web|abrir app|entrar a micaja|ingresar a micaja|mi cuenta web|micaja web|ver web)$/.test(lower);
-  if (esLinkWeb) {
-    try {
-      const magicToken = crypto.randomBytes(20).toString('hex');
-      await supabase.from('users').update({ magic_token: magicToken, magic_token_expiry: Date.now() + 10*60*1000 }).eq('id', user.id);
-      await sendWhatsApp(phone,
-        `🔐 *Tu acceso directo a MiCaja:*
 
-` +
-        `👉 https://milkomercios.in/MiCaja/login.html?magic=${magicToken}
-
-` +
-        `⏱ _Expira en 10 minutos, un solo uso._
-` +
-        `_Nadie más puede usarlo — es solo tuyo._`
-      );
-    } catch(e) {
-      await sendWhatsApp(phone, `🌐 milkomercios.in/MiCaja/login.html
-
-📱 ${phone}
-🔐 PIN: ${user.pin}`);
-    }
-    return;
-  }
 
   // ══════ BORRAR ÚLTIMO ══════
   if (['borrar ultimo','borrar último','borrar','deshacer'].includes(lower)) {
@@ -1355,31 +1297,16 @@ Puedes registrar directamente:
       if (!error) {
         const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', user.plan);
         const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
-        const emoji = ctx.type==='income' ? '💵' : '💸';
         await sendWhatsApp(phone,
-          `✅ *${ctx.type==='income'?'Ingreso':'Gasto'} guardado*
-
-` +
-          `${emoji} ${ctx.description}
-` +
-          `💰 ${ctx.type==='income'?'+':'-'}$${Number(ctx.amount).toLocaleString()} COP
-` +
-          `📂 ${useCat}
-
-` +
-          `Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}
-
-` +
-          `_Registra otro movimiento o escribe *menu*_`
+          `✅ *${ctx.type==='income'?'Ingreso':'Gasto'} guardado*\n\n` +
+          `${ctx.type==='income'?'💵':'💸'} ${ctx.description}\n` +
+          `💰 ${ctx.type==='income'?'+':'-'}$${Number(ctx.amount).toLocaleString()} COP\n` +
+          `📂 ${useCat}\n\n` +
+          `Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}\n\n` +
+          `_Registra otro o escribe *menu*_`
         );
-        // Si venía de un submenú, volver a él
-        if (ctx.returnTo) {
-          const modulo = ctx.returnTo.replace('sub_','');
-          await setCtxByPhone(phone, { step: ctx.returnTo });
-        } else {
-          // Sin returnTo: limpiar ctx para que el siguiente mensaje sea libre
-          await setCtxByPhone(phone, {});
-        }
+        if (ctx.returnTo) { await setCtxByPhone(phone, { step: ctx.returnTo }); }
+        else { await setCtxByPhone(phone, {}); }
       } else { await sendWhatsApp(phone, `❌ Error al guardar. Intenta de nuevo.`); }
     } else {
       await sendWhatsApp(phone,
