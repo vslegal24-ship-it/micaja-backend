@@ -2370,7 +2370,7 @@ app.post('/api/debts/:id/abono', async (req, res) => {
 
 app.put('/api/debts/:id', async (req, res) => {
   try {
-    const { person_name, amount, description, due_date, note, loan_date } = req.body;
+    const { person_name, amount, description, due_date, note, loan_date, status, paid } = req.body;
     const updates = {};
     if (person_name !== undefined) updates.person_name = person_name;
     if (amount !== undefined) updates.amount = amount;
@@ -2378,6 +2378,8 @@ app.put('/api/debts/:id', async (req, res) => {
     if (due_date !== undefined) updates.due_date = due_date || null;
     if (note !== undefined) updates.note = note;
     if (loan_date !== undefined) updates.loan_date = loan_date || null;
+    if (status !== undefined) updates.status = status;
+    if (paid !== undefined) updates.paid = paid;
     const { data, error } = await supabase.from('debts').update(updates).eq('id', req.params.id).select().single();
     if (error) throw error;
     res.json({ ok: true, debt: data });
