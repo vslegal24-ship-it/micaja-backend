@@ -237,7 +237,7 @@ app.post('/api/auth/magic', async (req, res) => {
       .single();
 
     if (!user) return res.status(401).json({ error: 'Link inválido o ya usado' });
-    if (!user.magic_token_expiry || user.magic_token_expiry < Date.now()) {
+    if (!user.magic_token_expiry || Number(user.magic_token_expiry) < Date.now()) {
       return res.status(401).json({ error: 'Link expirado. Escribe "web" al bot para obtener uno nuevo.' });
     }
 
@@ -1290,14 +1290,28 @@ Puedes registrar directamente:
   }
 
   // ══════ LINK WEB ══════
-  const webCmds = ['web','link','portal','dashboard','login','entrar','ingresar','acceder','mi cuenta','acceso web'];
-  if (webCmds.includes(lower) || webCmds.some(c => lower.includes(c))) {
+  // ══════ LINK WEB — sinónimos exactos para no interferir con el parser ══════
+  const esLinkWeb = /^(web|link|portal|app|aplicacion|aplicación|dashboard|login|acceso|acceso web|acceso directo|ir a la web|abrir web|abrir app|entrar a micaja|ingresar a micaja|mi cuenta web|micaja web|ver web)$/.test(lower);
+  if (esLinkWeb) {
     try {
       const magicToken = crypto.randomBytes(20).toString('hex');
       await supabase.from('users').update({ magic_token: magicToken, magic_token_expiry: Date.now() + 10*60*1000 }).eq('id', user.id);
-      await sendWhatsApp(phone, `🔐 *Tu acceso directo a MiCaja:*\n\n👉 https://milkomercios.in/MiCaja/login.html?magic=${magicToken}\n\n⏱ _Expira en 10 minutos, un solo uso._`);
+      await sendWhatsApp(phone,
+        `🔐 *Tu acceso directo a MiCaja:*
+
+` +
+        `👉 https://milkomercios.in/MiCaja/login.html?magic=${magicToken}
+
+` +
+        `⏱ _Expira en 10 minutos, un solo uso._
+` +
+        `_Nadie más puede usarlo — es solo tuyo._`
+      );
     } catch(e) {
-      await sendWhatsApp(phone, `🌐 milkomercios.in/MiCaja/login.html\n\n📱 ${phone}\n🔐 PIN: ${user.pin}`);
+      await sendWhatsApp(phone, `🌐 milkomercios.in/MiCaja/login.html
+
+📱 ${phone}
+🔐 PIN: ${user.pin}`);
     }
     return;
   }
