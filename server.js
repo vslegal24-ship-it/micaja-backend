@@ -1082,20 +1082,18 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ MENÚ PRINCIPAL — va PRIMERO para que los números no lleguen al parser ══════
+  // ══════ MENÚ PRINCIPAL ══════
   const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver al menu'].includes(lower);
   if (esMenu) {
-    // FIX: guardar ctx ANTES de enviar mensaje para evitar race condition
     await setCtxByPhone(phone, { step: 'menu_principal' });
     await enviarMenuPrincipal(phone, user);
     return;
   }
 
-  // ══════ NAVEGACIÓN DENTRO DE SUBMENÚ — también va antes de atajos ══════
+  // ══════ NAVEGACIÓN DENTRO DE SUBMENÚ ══════
   if (ctx.step && ctx.step.startsWith('sub_')) {
     const submenuActual = ctx.step.replace('sub_','');
     if (['0','volver','atras','menu','salir','back','inicio'].includes(lower)) {
-      // FIX race condition: guardar ctx antes de enviar
       await setCtxByPhone(phone, { step: 'menu_principal' });
       await enviarMenuPrincipal(phone, user);
       return;
@@ -1105,25 +1103,37 @@ async function processWhatsAppMessage(phone, text) {
   }
 
   // ══════ NAVEGACIÓN DESDE MENÚ PRINCIPAL ══════
-  // FIX: este bloque va ANTES de los atajos para que 1-9 no lleguen al parser de IA
+  // Aplica cuando ctx es menu_principal O cuando el mensaje es un número 1-9
+  // (el usuario puede responder rápido antes de que el ctx se guarde en DB)
+  const menuMap = {
+    '1':'negocio',   'negocio':'negocio',    'mi negocio':'negocio',
+    '2':'pareja',    'pareja':'pareja',       'parejas':'pareja',        'finanzas pareja':'pareja',
+    '3':'viajes',    'viajes':'viajes',       'viaje':'viajes',
+    '4':'personal',  'personal':'personal',   'finanzas':'personal',     'mis finanzas':'personal',
+    '5':'deudas',    'deudas':'deudas',       'mis deudas':'deudas',
+    '6':'pagos',     'metodos de pago':'pagos','mis pagos':'pagos',
+    '7':'mercado',   'mercado':'mercado',     'lista mercado':'mercado', 'mi mercado':'mercado',
+    '8':'tareas',    'tareas':'tareas',       'mis tareas':'tareas',
+    '9':'informes',  'informes':'informes',   'informe':'informes',      'reportes':'informes',
+  };
+
   if (ctx.step === 'menu_principal') {
-    const menuMap = {
-      '1':'negocio',   'negocio':'negocio',    'mi negocio':'negocio',
-      '2':'pareja',    'pareja':'pareja',       'parejas':'pareja',        'finanzas pareja':'pareja',
-      '3':'viajes',    'viajes':'viajes',       'viaje':'viajes',
-      '4':'personal',  'personal':'personal',   'finanzas':'personal',     'mis finanzas':'personal',
-      '5':'deudas',    'deudas':'deudas',       'mis deudas':'deudas',
-      '6':'pagos',     'metodos de pago':'pagos','mis pagos':'pagos',
-      '7':'mercado',   'mercado':'mercado',     'lista mercado':'mercado', 'mi mercado':'mercado',
-      '8':'tareas',    'tareas':'tareas',       'mis tareas':'tareas',
-      '9':'informes',  'informes':'informes',   'informe':'informes',      'reportes':'informes',
-    };
     const dest = menuMap[lower];
     if (dest) {
       await mostrarSubmenu(phone, dest, user);
     } else {
       await sendWhatsApp(phone, `Elige una opción del *1* al *9*\n\nEscribe *menu* para ver las opciones`);
     }
+    return;
+  }
+
+  // ══════ NÚMERO SUELTO SIN CONTEXTO — preguntar qué quiere decir ══════
+  // Si escribe solo un número 1-9 sin ctx activo, NO parsear como monto
+  // Mostrar el menú y dejar que elija de nuevo
+  if (/^[1-9]$/.test(lower) && !ctx.step) {
+    await setCtxByPhone(phone, { step: 'menu_principal' });
+    await sendWhatsApp(phone, `¿Querías ver el menú? Aquí tienes 👇`);
+    await enviarMenuPrincipal(phone, user);
     return;
   }
 
