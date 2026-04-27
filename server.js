@@ -1080,7 +1080,52 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ ATAJOS DIRECTOS — palabras clave sin menú ══════
+  // ══════ MENÚ PRINCIPAL — va PRIMERO para que los números no lleguen al parser ══════
+  const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver al menu'].includes(lower);
+  if (esMenu) {
+    await clearCtx();
+    await enviarMenuPrincipal(phone, user);
+    await setCtx({ step: 'menu_principal' });
+    return;
+  }
+
+  // ══════ NAVEGACIÓN DENTRO DE SUBMENÚ — también va antes de atajos ══════
+  if (ctx.step && ctx.step.startsWith('sub_')) {
+    const submenuActual = ctx.step.replace('sub_','');
+    if (['0','volver','atras','menu','salir','back','inicio'].includes(lower)) {
+      await clearCtx();
+      await enviarMenuPrincipal(phone, user);
+      await setCtx({ step: 'menu_principal' });
+      return;
+    }
+    await manejarSubmenu(phone, submenuActual, lower, text, user, ctx);
+    return;
+  }
+
+  // ══════ NAVEGACIÓN DESDE MENÚ PRINCIPAL ══════
+  // FIX: este bloque va ANTES de los atajos para que 1-9 no lleguen al parser de IA
+  if (ctx.step === 'menu_principal') {
+    const menuMap = {
+      '1':'negocio',   'negocio':'negocio',    'mi negocio':'negocio',
+      '2':'pareja',    'pareja':'pareja',       'parejas':'pareja',        'finanzas pareja':'pareja',
+      '3':'viajes',    'viajes':'viajes',       'viaje':'viajes',
+      '4':'personal',  'personal':'personal',   'finanzas':'personal',     'mis finanzas':'personal',
+      '5':'deudas',    'deudas':'deudas',       'mis deudas':'deudas',
+      '6':'pagos',     'metodos de pago':'pagos','mis pagos':'pagos',
+      '7':'mercado',   'mercado':'mercado',     'lista mercado':'mercado', 'mi mercado':'mercado',
+      '8':'tareas',    'tareas':'tareas',       'mis tareas':'tareas',
+      '9':'informes',  'informes':'informes',   'informe':'informes',      'reportes':'informes',
+    };
+    const dest = menuMap[lower];
+    if (dest) {
+      await mostrarSubmenu(phone, dest, user);
+    } else {
+      await sendWhatsApp(phone, `Elige una opción del *1* al *9*\n\nEscribe *menu* para ver las opciones`);
+    }
+    return;
+  }
+
+  // ══════ ATAJOS DIRECTOS — palabras clave sin menú (solo si NO hay ctx activo) ══════
   // Mercado
   if (/^(mi\s+)?(lista\s+(de\s+)?)?mercado$|^mis?\s+compras?$|^lista\s+compras?$/.test(lower)) {
     await mostrarSubmenu(phone, 'mercado', user); return;
@@ -1097,7 +1142,7 @@ async function processWhatsAppMessage(phone, text) {
   if (/^(mis?\s+)?deudas?$|^ver\s+deudas?$|^estado\s+deudas?$/.test(lower)) {
     await mostrarSubmenu(phone, 'deudas', user); return;
   }
-  // Módulos / cambiar módulo
+  // Módulos
   if (/^modulos?$|^mi\s+modulo$|^modulo\s+actual$|^en\s+que\s+modulo(\s+estoy)?$|^que\s+modulo(\s+tengo)?$|^cambiar\s+modulo$/.test(lower)) {
     await mostrarSubmenu(phone, 'modulo', user); return;
   }
@@ -1120,50 +1165,6 @@ async function processWhatsAppMessage(phone, text) {
   // Métodos de pago directo
   if (/^(mis?\s+)?(metodos?\s+(de\s+)?pago|llaves?|datos?\s+(de\s+)?pago|nequi|bancol|daviplata)$/.test(lower)) {
     await mostrarSubmenu(phone, 'pagos', user); return;
-  }
-
-  // ══════ MENÚ PRINCIPAL ══════
-  const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio','inicio menu','volver','volver al menu'].includes(lower);
-  if (esMenu) {
-    await clearCtx();
-    await enviarMenuPrincipal(phone, user);
-    await setCtx({ step: 'menu_principal' });
-    return;
-  }
-
-  // ══════ NAVEGACIÓN DESDE MENÚ PRINCIPAL ══════
-  if (ctx.step === 'menu_principal') {
-    const menuMap = {
-      '1':'negocio',   'negocio':'negocio',    'mi negocio':'negocio',
-      '2':'pareja',    'pareja':'pareja',       'parejas':'pareja',        'finanzas pareja':'pareja',
-      '3':'viajes',    'viajes':'viajes',       'viaje':'viajes',
-      '4':'personal',  'personal':'personal',   'finanzas':'personal',     'mis finanzas':'personal',
-      '5':'deudas',    'deudas':'deudas',       'mis deudas':'deudas',
-      '6':'pagos',     'metodos de pago':'pagos','mis pagos':'pagos',      'nequi':'pagos',
-      '7':'mercado',   'mercado':'mercado',     'lista mercado':'mercado', 'mi mercado':'mercado',
-      '8':'tareas',    'tareas':'tareas',       'mis tareas':'tareas',
-      '9':'informes',  'informes':'informes',   'informe':'informes',      'reportes':'informes',
-    };
-    const dest = menuMap[lower];
-    if (dest) {
-      await mostrarSubmenu(phone, dest, user);
-    } else {
-      await sendWhatsApp(phone, `Elige una opción del *1* al *9*\n\nEscribe *menu* para ver las opciones`);
-    }
-    return;
-  }
-
-  // ══════ NAVEGACIÓN DENTRO DE SUBMENÚ ══════
-  if (ctx.step && ctx.step.startsWith('sub_')) {
-    const submenuActual = ctx.step.replace('sub_','');
-    if (['0','volver','atras','menu','salir','back','inicio'].includes(lower)) {
-      await clearCtx();
-      await enviarMenuPrincipal(phone, user);
-      await setCtx({ step: 'menu_principal' });
-      return;
-    }
-    await manejarSubmenu(phone, submenuActual, lower, text, user, ctx);
-    return;
   }
 
   // ══════ INFORME ══════
