@@ -141,7 +141,7 @@ app.post('/api/auth/verify', rateLimit(10, 30), async (req, res) => {
     if (user.verify_expiry < Date.now()) return res.status(401).json({ error: 'Código expirado. Regístrate de nuevo.' });
     await supabase.from('users').update({ status: 'active', verify_code: null, verify_expiry: null }).eq('id', user.id);
     await sendWhatsApp(phone,
-      `✅ *¡Cuenta verificada!*\n\nBienvenido a MiCaja ${user.name || ''}.\n\n📱 Puedes usarme aquí por WhatsApp o desde:\n🌐 milkomercios.in/MiCaja/login.html\n\nEscribe *ayuda* para ver todo lo que puedo hacer.`
+      `✅ *¡Cuenta verificada!*\n\nBienvenido a MiCaja ${user.name || ''}.\n\n📱 Puedes usarme aquí por WhatsApp o desde:\n🌐 milkomercios.in/MiCaja/MiCaja.html\n\nEscribe *ayuda* para ver todo lo que puedo hacer.`
     );
     const { pin: _, verify_code: __, ...safeUser } = user;
     res.json({ ok: true, user: { ...safeUser, status: 'active' } });
@@ -360,7 +360,7 @@ app.get('/api/download/:token', async (req, res) => {
       <span style="font-weight:700">📄 ${data.filename.replace('.html','')} · <span style="opacity:.6;font-weight:400">Informe MiCaja</span></span>
       <div style="display:flex;gap:8px">
         <button onclick="window.print()" style="padding:7px 16px;background:#25D366;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer;font-size:12px">⬇️ Guardar PDF</button>
-        <a href="https://milkomercios.in/MiCaja" style="padding:7px 16px;background:#334155;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer;font-size:12px;text-decoration:none">MiCaja</a>
+        <a href="https://milkomercios.in/MiCaja/MiCaja.html" style="padding:7px 16px;background:#334155;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer;font-size:12px;text-decoration:none">MiCaja</a>
       </div>
     </div>
     <div style="height:46px"></div>
@@ -646,7 +646,7 @@ app.post('/api/trips/recordatorio', async (req, res) => {
       `⚠️ Saldo pendiente: *$${pendiente.toLocaleString()} COP*\n━━━━━━━━━━━━━━━━\n\n` +
       `*${to_name}* puso ese dinero de su bolsillo por ti durante el viaje.\n\n` +
       `_Para quitarte de estos recordatorios, pídele a *${to_name}* que marque la deuda como pagada en MiCaja._ 😊\n\n` +
-      `_MiCaja · milkomercios.in/MiCaja_`;
+      `_MiCaja · https://milkomercios.in/MiCaja/MiCaja.html_`;
 
     const { data: registrado } = await supabase.from('users').select('id').eq('phone', finalPhone).single();
     if (registrado) {
@@ -706,7 +706,7 @@ app.post('/api/trips/:id/finalizar', async (req, res) => {
       if (myDebts.length) { msg += `💸 *Debes pagarle a:*\n`; myDebts.forEach(d => { msg += `  • ${d.to}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
       if (myCredits.length) { msg += `💵 *Te deben pagarte:*\n`; myCredits.forEach(d => { msg += `  • ${d.from}: $${d.amount.toLocaleString()}\n`; }); msg += '\n'; }
       if (!myDebts.length && !myCredits.length) msg += `✅ ¡Estás al día!\n\n`;
-      msg += `_Enviado desde MiCaja · milkomercios.in/MiCaja_`;
+      msg += `_Enviado desde MiCaja · https://milkomercios.in/MiCaja/MiCaja.html_`;
       if (registrado) {
         await sendWhatsApp(finalPhone, msg);
         phonesSent.push(member.name);
@@ -932,7 +932,7 @@ app.post('/webhook', async (req, res) => {
     const waLimit = rateLimitWA(from);
     if (waLimit.blocked) {
       console.warn(`⚠️ WA rate limit (${waLimit.reason}): ${from}`);
-      if (waLimit.reason === 'dia') await sendWhatsApp(from, `⚠️ Has alcanzado el límite de mensajes por hoy. Intenta mañana o usa la web: milkomercios.in/MiCaja`);
+      if (waLimit.reason === 'dia') await sendWhatsApp(from, `⚠️ Has alcanzado el límite de mensajes por hoy. Intenta mañana o usa la web: https://milkomercios.in/MiCaja/MiCaja.html`);
       return res.sendStatus(200);
     }
 
@@ -1068,7 +1068,7 @@ async function processWhatsAppMessage(phone, text) {
         `_Nadie más puede usarlo — es solo tuyo._`
       );
     } catch(e) {
-      await sendWhatsApp(phone, `🌐 milkomercios.in/MiCaja/login.html
+      await sendWhatsApp(phone, `🌐 milkomercios.in/MiCaja/MiCaja.html
 
 📱 ${phone}
 🔐 PIN: ${user.pin}`);
@@ -1207,6 +1207,13 @@ async function processWhatsAppMessage(phone, text) {
 
     // Módulos financieros: texto libre → parser directo sin salir del módulo
     if (['negocio','pareja','personal'].includes(submenuActual) && !ctx.esperando && !ctx.step2) {
+      // PDF/informe desde dentro del módulo
+      if (['pdf','informe','reporte','mi informe','ver informe','informe pdf'].includes(lower)) {
+        const modKey = submenuActual==='negocio'?'comerciantes':submenuActual==='pareja'?'parejas':'personal';
+        const titulo = {negocio:'Mi Negocio',pareja:'Finanzas en Pareja',personal:'Finanzas Personales'}[submenuActual];
+        await generarYEnviarPDF(phone, user, modKey, titulo);
+        return;
+      }
       if (!/^[1-6]$/.test(lower) && !['resumen','pdf','informe','ultimos','cancelar','como voy','saldo'].includes(lower)) {
         const parsed = await parseWithAI(lower, user.name, user.plan);
         if (parsed) {
@@ -1851,7 +1858,7 @@ async function manejarSubmenu(phone, modulo, lower, textOriginal, user, ctx) {
         const yoDebo  = (deudas||[]).filter(d=>d.type==='debo');
         const totalMD = meDeben.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
         const totalYD = yoDebo.reduce((s,d)=>s+Number(d.amount)-(Number(d.paid)||0),0);
-        const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Deudas</title><style>body{font-family:Segoe UI,sans-serif;padding:28px;color:#0F172A}h1{font-size:20px;font-weight:800;margin-bottom:3px}.sub{color:#64748B;font-size:12px;margin-bottom:18px}.cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:18px}.card{border-radius:10px;padding:14px;text-align:center}.val{font-size:18px;font-weight:800;margin:4px 0}.lbl{font-size:11px;color:#64748B}.sec h3{font-size:13px;font-weight:700;margin:14px 0 8px;border-bottom:2px solid #E2E8F0;padding-bottom:4px}.row{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #F8FAFC;font-size:11px}.footer{margin-top:20px;font-size:10px;color:#94A3B8;text-align:center;border-top:1px solid #E2E8F0;padding-top:10px}</style></head><body><h1>Deudas</h1><div class="sub">${new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'})} — ${user.name||''}</div><div class="cards"><div class="card" style="background:#ECFDF5;border:1px solid #6EE7B7"><div class="val" style="color:#059669">$${totalMD.toLocaleString()}</div><div class="lbl">Me deben</div></div><div class="card" style="background:#FEF2F2;border:1px solid #FCA5A5"><div class="val" style="color:#EF4444">$${totalYD.toLocaleString()}</div><div class="lbl">Yo debo</div></div><div class="card" style="background:${totalMD>=totalYD?'#EFF6FF':'#FEF2F2'};border:1px solid ${totalMD>=totalYD?'#93C5FD':'#FCA5A5'}"><div class="val" style="color:${totalMD>=totalYD?'#2563EB':'#EF4444'}">${totalMD>=totalYD?'+':''}$${(totalMD-totalYD).toLocaleString()}</div><div class="lbl">Balance</div></div></div><div class="sec"><h3>Me deben</h3>${meDeben.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#059669">$${p.toLocaleString()}</span></div>`;}).join('')||'<p style="color:#94A3B8;font-size:11px">Ninguna</p>'}</div><div class="sec"><h3>Yo debo</h3>${yoDebo.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#EF4444">$${p.toLocaleString()}</span></div>`;}).join('')||'<p style="color:#94A3B8;font-size:11px">Ninguna</p>'}</div><div class="footer">MiCaja — milkomercios.in/MiCaja</div></body></html>`;
+        const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Deudas</title><style>body{font-family:Segoe UI,sans-serif;padding:28px;color:#0F172A}h1{font-size:20px;font-weight:800;margin-bottom:3px}.sub{color:#64748B;font-size:12px;margin-bottom:18px}.cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:18px}.card{border-radius:10px;padding:14px;text-align:center}.val{font-size:18px;font-weight:800;margin:4px 0}.lbl{font-size:11px;color:#64748B}.sec h3{font-size:13px;font-weight:700;margin:14px 0 8px;border-bottom:2px solid #E2E8F0;padding-bottom:4px}.row{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #F8FAFC;font-size:11px}.footer{margin-top:20px;font-size:10px;color:#94A3B8;text-align:center;border-top:1px solid #E2E8F0;padding-top:10px}</style></head><body><h1>Deudas</h1><div class="sub">${new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'long',year:'numeric'})} — ${user.name||''}</div><div class="cards"><div class="card" style="background:#ECFDF5;border:1px solid #6EE7B7"><div class="val" style="color:#059669">$${totalMD.toLocaleString()}</div><div class="lbl">Me deben</div></div><div class="card" style="background:#FEF2F2;border:1px solid #FCA5A5"><div class="val" style="color:#EF4444">$${totalYD.toLocaleString()}</div><div class="lbl">Yo debo</div></div><div class="card" style="background:${totalMD>=totalYD?'#EFF6FF':'#FEF2F2'};border:1px solid ${totalMD>=totalYD?'#93C5FD':'#FCA5A5'}"><div class="val" style="color:${totalMD>=totalYD?'#2563EB':'#EF4444'}">${totalMD>=totalYD?'+':''}$${(totalMD-totalYD).toLocaleString()}</div><div class="lbl">Balance</div></div></div><div class="sec"><h3>Me deben</h3>${meDeben.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#059669">$${p.toLocaleString()}</span></div>`;}).join('')||'<p style="color:#94A3B8;font-size:11px">Ninguna</p>'}</div><div class="sec"><h3>Yo debo</h3>${yoDebo.map(d=>{const p=Number(d.amount)-(Number(d.paid)||0);return `<div class="row"><span style="flex:1;font-weight:600">${d.person_name}</span><span style="color:#64748B">${d.description||''}</span><span style="font-weight:700;color:#EF4444">$${p.toLocaleString()}</span></div>`;}).join('')||'<p style="color:#94A3B8;font-size:11px">Ninguna</p>'}</div><div class="footer">MiCaja — https://milkomercios.in/MiCaja/MiCaja.html</div></body></html>`;
         const token = crypto.randomBytes(16).toString('hex');
         await supabase.from('temp_files').insert({token, content:html, filename:'deudas.html', expires_at:new Date(Date.now()+24*60*60*1000).toISOString()});
         await sendWhatsApp(phone, `📄 *Informe Deudas*\n\n📥 https://micaja-backend-production.up.railway.app/api/download/${token}\n_Disponible 24 horas_\n\n*0* Menú`);
@@ -2209,7 +2216,7 @@ h1{font-size:20px;font-weight:800;margin-bottom:3px}
 <div class="movs"><h3>Movimientos (${movs.length})</h3>
 ${movs.map(m=>`<div class="mov-row"><span style="width:8px;height:8px;border-radius:50%;background:${m.type==='income'?'#25D366':'#EF4444'};flex-shrink:0;margin-top:2px;display:inline-block"></span><span style="flex:1">${m.description}</span><span style="color:#94A3B8;min-width:80px">${m.category||''}</span><span style="color:#94A3B8;min-width:75px">${m.date}</span><span style="font-weight:700;color:${m.type==='income'?'#059669':'#EF4444'}">${m.type==='income'?'+':'-'}$${Number(m.amount).toLocaleString()}</span></div>`).join('')}
 </div>
-<div class="footer">MiCaja - milkomercios.in/MiCaja${userName?' - '+userName:''}</div>
+<div class="footer">MiCaja - https://milkomercios.in/MiCaja/MiCaja.html${userName?' - '+userName:''}</div>
 </body></html>`;
 }
 
