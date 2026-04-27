@@ -968,10 +968,20 @@ async function getCtxByPhone(phone) {
   if (!session || !session.context) return {};
   try {
     const ctx = JSON.parse(session.context);
-    // Ctx expira a los 15 min de inactividad para evitar estados fantasma
+    // Ctx expira según el tipo de paso:
+    // - menu_principal: 2 horas (el usuario puede demorar en responder)
+    // - confirm_cat: 30 min (confirmación de gasto no debe quedar colgada)
+    // - sub_*: 1 hora
+    // - otros: 30 min
     if (ctx.step && session.updated_at) {
       const age = Date.now() - new Date(session.updated_at).getTime();
-      if (age > 15 * 60 * 1000) return {};
+      const timeouts = {
+        'menu_principal': 2 * 60 * 60 * 1000,   // 2 horas
+        'confirm_cat':    30 * 60 * 1000,         // 30 min
+      };
+      const defaultTimeout = ctx.step.startsWith('sub_') ? 60 * 60 * 1000 : 30 * 60 * 1000;
+      const limit = timeouts[ctx.step] || defaultTimeout;
+      if (age > limit) return {};
     }
     return ctx;
   } catch { return {}; }
@@ -1127,15 +1137,7 @@ async function processWhatsAppMessage(phone, text) {
     return;
   }
 
-  // ══════ NÚMERO SUELTO SIN CONTEXTO — preguntar qué quiere decir ══════
-  // Si escribe solo un número 1-9 sin ctx activo, NO parsear como monto
-  // Mostrar el menú y dejar que elija de nuevo
-  if (/^[1-9]$/.test(lower) && !ctx.step) {
-    await setCtxByPhone(phone, { step: 'menu_principal' });
-    await sendWhatsApp(phone, `¿Querías ver el menú? Aquí tienes 👇`);
-    await enviarMenuPrincipal(phone, user);
-    return;
-  }
+
 
   // ══════ ATAJOS DIRECTOS — palabras clave sin menú (solo si NO hay ctx activo) ══════
   // Mercado
