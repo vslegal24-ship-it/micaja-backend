@@ -1109,7 +1109,7 @@ async function processWhatsAppMessage(phone, text) {
   }
 
   // ══════ MENÚ PRINCIPAL ══════
-  const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver al menu'].includes(lower);
+  const esMenu = ['menu','menues','modulo','modulos','mi modulo','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver al menu'].includes(lower) || /^modulos?$|^mi\s+modulo$|^cambiar\s+modulo$/.test(lower);
   if (esMenu) {
     await setCtxByPhone(phone, { step: 'menu_principal' });
     await enviarMenuPrincipal(phone, user);
@@ -1119,11 +1119,73 @@ async function processWhatsAppMessage(phone, text) {
   // ══════ NAVEGACIÓN DENTRO DE SUBMENÚ ══════
   if (ctx.step && ctx.step.startsWith('sub_')) {
     const submenuActual = ctx.step.replace('sub_','');
+
+    // Volver al menú
     if (['0','volver','atras','menu','salir','back','inicio'].includes(lower)) {
       await setCtxByPhone(phone, { step: 'menu_principal' });
       await enviarMenuPrincipal(phone, user);
       return;
     }
+
+    // En módulos financieros (negocio/pareja/personal): si el mensaje no es
+    // un número ni un comando del submenú, tratarlo como movimiento natural
+    const modulosFinancieros = ['negocio','pareja','personal'];
+    if (modulosFinancieros.includes(submenuActual) && !ctx.esperando && !ctx.step2) {
+      // Si NO es número 1-6 ni comando conocido → parsear como gasto/ingreso directamente
+      const esComandoSubmenu = /^[1-6]$/.test(lower) ||
+        ['resumen','pdf','informe','ultimos','últimos','cancelar'].includes(lower);
+      if (!esComandoSubmenu) {
+        // Caer al parser natural — el ctx de submenú se mantiene
+        // así cuando termine de registrar sigue en el módulo
+        const parsed = await parseWithAI(lower, user.name, user.plan);
+        if (parsed) {
+          const planNames = {personal:'👤 Personal',parejas:'💑 Pareja',viajes:'✈️ Viajes',comerciantes:'🏪 Negocio'};
+          await setCtxByPhone(phone, {
+            step: 'confirm_cat',
+            type: parsed.type, amount: parsed.amount,
+            description: parsed.description, category: parsed.category,
+            returnTo: ctx.step  // recordar a qué submenú volver
+          });
+          await sendWhatsApp(phone,
+            `${parsed.type==='income'?'💵':'💸'} *¿Confirmas este ${parsed.type==='income'?'ingreso':'gasto'}?*
+
+` +
+            `📝 *${parsed.description}*
+` +
+            `💰 ${parsed.type==='income'?'+':'-'}$${Number(parsed.amount).toLocaleString()} COP
+` +
+            `📂 ${parsed.category} · *${planNames[user.plan]}*
+
+` +
+            `✅ *sí* — guardar
+` +
+            `🔢 *1-12* — cambiar categoría
+` +
+            `❌ *no* — cancelar
+
+` +
+            `_1.Alimentación 2.Arriendo 3.Servicios 4.Transporte 5.Salud 6.Entretenimiento 7.Educación 8.Nómina 9.Proveedores 10.Créditos 11.Ventas 12.Otros_`
+          );
+          return;
+        }
+        // Si el parser no entiende, mostrar el submenú de nuevo
+        await sendWhatsApp(phone,
+          `No entendí 🤔
+
+Puedes registrar directamente:
+` +
+          `💸 _"pagué arriendo 800mil"_
+` +
+          `💵 _"me ingresaron 2 millones"_
+
+` +
+          `O elige una opción del menú del módulo:`
+        );
+        await mostrarSubmenu(phone, submenuActual, user);
+        return;
+      }
+    }
+
     await manejarSubmenu(phone, submenuActual, lower, text, user, ctx);
     return;
   }
@@ -1279,14 +1341,31 @@ async function processWhatsAppMessage(phone, text) {
       if (!error) {
         const { data: movs } = await supabase.from('movements').select('type, amount').eq('user_id', user.id).eq('module', user.plan);
         const bal = (movs||[]).reduce((s,m) => s + (m.type==='income' ? Number(m.amount) : -Number(m.amount)), 0);
+        const emoji = ctx.type==='income' ? '💵' : '💸';
         await sendWhatsApp(phone,
-          `✅ *${ctx.type==='income'?'Ingreso':'Gasto'} guardado*\n\n` +
-          `${ctx.type==='income'?'💵':'💸'} ${ctx.description}\n` +
-          `💰 ${ctx.type==='income'?'+':'-'}$${Number(ctx.amount).toLocaleString()} COP\n` +
-          `📂 ${useCat}\n\n` +
-          `Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}\n\n` +
-          `_Escribe "como voy" o "menu" para más opciones_`
+          `✅ *${ctx.type==='income'?'Ingreso':'Gasto'} guardado*
+
+` +
+          `${emoji} ${ctx.description}
+` +
+          `💰 ${ctx.type==='income'?'+':'-'}$${Number(ctx.amount).toLocaleString()} COP
+` +
+          `📂 ${useCat}
+
+` +
+          `Balance: *${bal>=0?'+':''}$${bal.toLocaleString()}* ${bal<0?'⚠️':'👍'}
+
+` +
+          `_Registra otro movimiento o escribe *menu*_`
         );
+        // Si venía de un submenú, volver a él
+        if (ctx.returnTo) {
+          const modulo = ctx.returnTo.replace('sub_','');
+          await setCtxByPhone(phone, { step: ctx.returnTo });
+        } else {
+          // Sin returnTo: limpiar ctx para que el siguiente mensaje sea libre
+          await setCtxByPhone(phone, {});
+        }
       } else { await sendWhatsApp(phone, `❌ Error al guardar. Intenta de nuevo.`); }
     } else {
       await sendWhatsApp(phone,
