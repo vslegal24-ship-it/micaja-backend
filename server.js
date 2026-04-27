@@ -91,7 +91,7 @@ function rateLimitWA(phone, maxPerDay = 150, maxPerMinute = 15) {
 
 // ══════ HEALTH CHECK ══════
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'MiCaja Backend', version: '2.2.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'MiCaja Backend', version: '2.3.1', timestamp: new Date().toISOString() });
 });
 
 function normalizePhone(phone) {
@@ -957,22 +957,24 @@ app.post('/webhook', async (req, res) => {
 // FIX v2.2: siempre upsert por phone, nunca merge con estado viejo
 // ══════════════════════════════════════
 async function setCtxByPhone(phone, newCtx) {
-  // IMPORTANTE: siempre sobrescribe — nunca mezcla con contexto anterior
   await supabase.from('wa_sessions').upsert(
-    {
-      phone,
-      context: JSON.stringify(newCtx),
-      last_message: null,
-      updated_at: new Date().toISOString()
-    },
+    { phone, context: JSON.stringify(newCtx), updated_at: new Date().toISOString() },
     { onConflict: 'phone' }
   );
 }
 
 async function getCtxByPhone(phone) {
-  const { data: session } = await supabase.from('wa_sessions').select('context').eq('phone', phone).single();
+  const { data: session } = await supabase.from('wa_sessions').select('context, updated_at').eq('phone', phone).single();
   if (!session || !session.context) return {};
-  try { return JSON.parse(session.context); } catch { return {}; }
+  try {
+    const ctx = JSON.parse(session.context);
+    // Ctx expira a los 15 min de inactividad para evitar estados fantasma
+    if (ctx.step && session.updated_at) {
+      const age = Date.now() - new Date(session.updated_at).getTime();
+      if (age > 15 * 60 * 1000) return {};
+    }
+    return ctx;
+  } catch { return {}; }
 }
 
 // ══════════════════════════════════════
@@ -1083,9 +1085,9 @@ async function processWhatsAppMessage(phone, text) {
   // ══════ MENÚ PRINCIPAL — va PRIMERO para que los números no lleguen al parser ══════
   const esMenu = ['menu','menues','opciones','que puedes hacer','comandos','ayuda','help','inicio menu','volver al menu'].includes(lower);
   if (esMenu) {
-    await clearCtx();
+    // FIX: guardar ctx ANTES de enviar mensaje para evitar race condition
+    await setCtxByPhone(phone, { step: 'menu_principal' });
     await enviarMenuPrincipal(phone, user);
-    await setCtx({ step: 'menu_principal' });
     return;
   }
 
@@ -1093,9 +1095,9 @@ async function processWhatsAppMessage(phone, text) {
   if (ctx.step && ctx.step.startsWith('sub_')) {
     const submenuActual = ctx.step.replace('sub_','');
     if (['0','volver','atras','menu','salir','back','inicio'].includes(lower)) {
-      await clearCtx();
+      // FIX race condition: guardar ctx antes de enviar
+      await setCtxByPhone(phone, { step: 'menu_principal' });
       await enviarMenuPrincipal(phone, user);
-      await setCtx({ step: 'menu_principal' });
       return;
     }
     await manejarSubmenu(phone, submenuActual, lower, text, user, ctx);
