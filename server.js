@@ -2475,6 +2475,55 @@ app.get('/api/payments/status/:userId', async (req, res) => {
   } catch (err) { res.json({ ok: true, active: false }); }
 });
 
+
+// ══════ REGALO DE MESES (Admin) ══════
+app.post('/api/payments/regalo', async (req, res) => {
+  try {
+    const adminPhone = req.headers['x-admin-phone'];
+    if (!adminPhone) return res.status(401).json({ error: 'No autorizado' });
+    const { data: adminUser } = await supabase.from('users').select('role').eq('phone', adminPhone).single();
+    if (!adminUser || adminUser.role !== 'admin') return res.status(403).json({ error: 'Solo administradores' });
+
+    const { user_id, plan_type, dias, period_start, period_end, amount } = req.body;
+    if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
+
+    // Crear registro de pago como regalo
+    const { data, error } = await supabase.from('payments').insert({
+      user_id,
+      amount: amount || 0,
+      method: 'regalo',
+      reference: `REGALO-${adminPhone.slice(-4)}-${Date.now()}`,
+      status: 'paid',
+      plan_type: plan_type || 'regalo',
+      period_start: period_start || new Date().toISOString().split('T')[0],
+      period_end: period_end || new Date(Date.now() + (dias || 30) * 86400000).toISOString().split('T')[0]
+    }).select().single();
+
+    if (error) throw error;
+
+    // Activar usuario
+    await supabase.from('users').update({ status: 'active' }).eq('id', user_id);
+
+    // Notificar al usuario por WhatsApp
+    const { data: usuario } = await supabase.from('users').select('phone, name').eq('id', user_id).single();
+    if (usuario && WA_TOKEN) {
+      const meses = plan_type === 'lifetime' ? 'de por vida' : Math.round((dias || 30) / 30) + ' mes' + (Math.round((dias||30)/30) > 1 ? 'es' : '');
+      await sendWhatsApp(usuario.phone,
+        `🎁 *¡Tienes acceso gratuito a MiCaja!*\n\n` +
+        `El equipo de MiCaja te ha regalado *${meses}* de acceso completo.\n\n` +
+        `✅ Tu cuenta está activa.\n` +
+        `📅 Válido hasta: *${period_end}*\n\n` +
+        `¡Aprovéchalo! Escribe *menu* para comenzar 🚀`
+      );
+    }
+
+    res.json({ ok: true, payment: data });
+  } catch (err) {
+    console.error('Regalo error:', err);
+    res.status(500).json({ error: 'Error al registrar regalo' });
+  }
+});
+
 // ══════ INICIAR ══════
 app.listen(PORT, () => {
   console.log(`⚡ MiCaja Backend v2.2 en puerto ${PORT}`);
